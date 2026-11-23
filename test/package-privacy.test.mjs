@@ -1037,6 +1037,7 @@ const expected = [
   "worker/src/lib/bank-coverage-intervals.js",
   "worker/src/lib/simplefin-bank-feed.js",
   "worker/src/lib/simplefin-ledger.js",
+  "worker/src/lib/simplefin-minor-unit-evidence.js",
   "worker/src/lib/simplefin-coverage-review.js",
   "worker/src/lib/simplefin-reconciliation.js",
   "worker/src/lib/confidence.js",

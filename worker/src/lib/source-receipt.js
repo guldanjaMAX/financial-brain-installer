@@ -1,3 +1,5 @@
+export const DRIVE_CHECKPOINT_PENDING = "DRIVE_CHECKPOINT_PENDING";
+
 /**
  * Privacy-safe failure contract for connector source receipts.
  *

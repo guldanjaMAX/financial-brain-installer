@@ -36,7 +36,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.33, schema70.** Publication, supported
+**Package identity: brain-installer 0.4.34, schema70.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -50,7 +50,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.33 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.34 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -991,9 +991,19 @@ key. Never print a decrypted backup or restore a legacy literal credential.
 
 After a replacement, fully quit and reopen Claude Code to load the verified
 nine-tool registration. The money tools and document fetch are available
-independently of the model-route check. If Claude is still open during
-reconnect, a subsequent `brain health` or `brain daily run` completes the
-pending check when Claude is closed.
+independently of the model-route check. If a successful answer lacks enough
+backend timing to prove the route and the money query responds, ordinary
+`--apply` keeps the registration and leaves the answer-route check pending,
+including when the answer reports incomplete document coverage.
+The local MCP runtime builds the receipt from Worker timing for a completed
+Opus answer and Sonnet check. The Owner assistant profile has diagnostics
+access and its local runtime authenticates to the think route with the durable
+admin key. Worker builds 0.4.19 through 0.4.33 support that timing without a
+request flag. The local receipt projection appears in the 0.4.20 candidate.
+If the deployed Worker lacks timing, updating the Brain
+deploys the reviewed Worker modules. A subsequent `brain health` or
+`brain daily run` retries a pending check when Claude is closed. `brain health`
+reports whether the Claude answer-route retry passed or why it remains pending.
 
 ---
 

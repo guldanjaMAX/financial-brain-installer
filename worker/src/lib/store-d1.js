@@ -58,7 +58,7 @@ import {
   PUBLIC_INSTALL_SMOKE_TITLE,
   publicInstallSmokeContentHash,
 } from "./install-smoke.js";
-import { parseProviderWithheldReason, parseStoredSourceFailureEvidence, providerNoChangeCheckAt, providerWithheldCheckAt, providerSetAsideOwnerCopy, sourceReceiptOwnerMessage } from "./source-receipt.js";
+import { parseProviderWithheldReason, parseStoredSourceFailureEvidence, providerNoChangeCheckAt, providerWithheldCheckAt, providerSetAsideOwnerCopy, sourceReceiptOwnerMessage, DRIVE_CHECKPOINT_PENDING } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { zoomSourceStatus } from "./zoom-deliveries.js";
 import { scopeIsUnrestricted } from "./grants.js";
@@ -4136,6 +4136,9 @@ function operationalFreshness(s, now) {
   const started = timestampMs(s.indexing_started_at);
   const indexingMs = Number.isFinite(started) ? Math.max(0, now - started) : null;
 
+  if (s.stale_reason === DRIVE_CHECKPOINT_PENDING) {
+    return { state: "stale", reason: "Drive saved its checkpoint and will resume at the next scheduled refresh", indexingMs };
+  }
   if (s.stale_reason === "NO_VERIFIED_WORK") {
     return {
       state: "review",
@@ -4330,7 +4333,17 @@ function assessCoverageRows(rows, {
     }, now);
     // Zero-work receipts must also stop aggregate-only update readers, even
     // while the previous successful date is inside the schedule grace period.
-    let sourceIsStale = s.stale_reason === "NO_VERIFIED_WORK";
+    const checkpointPending = s.stale_reason === DRIVE_CHECKPOINT_PENDING;
+    let sourceIsStale = s.stale_reason === "NO_VERIFIED_WORK" || checkpointPending;
+    if (checkpointPending) {
+      gaps.push({
+        type: "coverage_stale",
+        source: s.name,
+        days_since_ingest: days,
+        detail: `${operational.reason}. Material after the checkpoint may be missing.`,
+        remedy: "No action needed.",
+      });
+    }
 
     if (operational.state === "broken") {
       sourceIsStale = true;
@@ -4397,7 +4410,7 @@ function assessCoverageRows(rows, {
 
     // 1.5x before complaining: a cron that runs daily and is six hours late is
     // working. Warning at the first minute past due is how alerts get ignored.
-    if (ageSec !== null && ageSec > expected * 1.5) {
+    if (!checkpointPending && ageSec !== null && ageSec > expected * 1.5) {
       sourceIsStale = true;
       const heldForReview = operational.state === "review" &&
         String(s.stale_reason || "").trim().toUpperCase() === SOURCE_REVIEW_ISSUE_CODE;
@@ -5675,7 +5688,9 @@ export async function sourceInventorySlice(env, {
             // Bank activity freshness is the slowest successful connection sync,
             // independently fenced from derived document writes.
             last_successful_run_at: inventoryTimestamp(kind === 'bank_activity' ? row.last_ingest_at : row.last_successful_run_at),
-            last_check_at: providerNoChangeCheckAt(kind, latestRun) || withheldCheckAt || inventoryTimestamp(row.last_successful_run_at),
+            last_check_at: row.stale_reason === DRIVE_CHECKPOINT_PENDING
+              ? inventoryTimestamp(row.last_ingest_at)
+              : providerNoChangeCheckAt(kind, latestRun) || withheldCheckAt || inventoryTimestamp(row.last_successful_run_at),
             ...(sourceId === "zoom" && kind === "zoom" && zoomStatus ? { zoom: zoomStatus } : {}),
             complete_history_through: inventoryTimestamp(row.last_complete_sweep_at),
             reported_logical_documents: inventoryCount(row.reported_logical_documents),

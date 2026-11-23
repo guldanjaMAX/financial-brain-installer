@@ -8445,12 +8445,20 @@ async function resumePendingClaudeRouteProof(manifestPath, options = {}) {
   return proof;
 }
 
-export function resumeClaudeRouteAfterCommand(command, [target, next], options = {}) {
+export async function resumeClaudeRouteAfterCommand(command, [target, next], options = {}) {
   // Health and scheduled refresh are ordinary opportunities to finish proof.
   // A preview or status command must stay within its read-only contract.
   const manifestPath = command === "health" ? target :
     command === "daily" && target === "run" ? next : null;
-  return resumePendingClaudeRouteProof(manifestPath, options);
+  const proof = await resumePendingClaudeRouteProof(manifestPath, options);
+  if (command === "health" && proof) {
+    if (proof.ready) reportPartBRouteReadiness(proof, options);
+    else {
+      warn(`Claude answer route not ready: ${normalizePartBRouteReadinessReason(proof.reason)}.`);
+      if (proof.card) info(proof.card.message);
+    }
+  }
+  return proof;
 }
 
 /**
@@ -8609,7 +8617,10 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
         await runClaudeRouteProof(manifestPath, options);
     }
     if (partBManifest) {
-      if (replaceOwnerEntry && result.wired.includes("Claude Code") && !routeReadiness.ready) {
+      const missingReceiptWithMoneyLink = routeReadiness.reason === "receipt_missing" &&
+        routeReadiness.money_link_verified === true;
+      if ((replaceOwnerEntry || missingReceiptWithMoneyLink) &&
+          result.wired.includes("Claude Code") && !routeReadiness.ready) {
         // Registration and tool discovery already passed. A model-route
         // failure remains pending without making the owner redo reconnect.
         try { deferClaudeRouteProof(manifestPath); }
@@ -8617,6 +8628,11 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
         options.onPartBRouteDecision?.(Object.freeze({
           ready: false, reason: normalizePartBRouteReadinessReason(routeReadiness.reason),
         }));
+        if (missingReceiptWithMoneyLink) {
+          info("Claude answers are not proven yet. Update my Brain, then say Check my Brain.");
+        } else if (routeReadiness.reason !== "claude_code_running") {
+          info(`Claude answer route not ready: ${normalizePartBRouteReadinessReason(routeReadiness.reason)}.`);
+        }
       } else {
         reportPartBRouteReadiness(routeReadiness, options);
       }
@@ -17271,9 +17287,9 @@ export function loadSourceRegistry(commands = {}) {
       scope: "bounded incremental additions and updates; existing documents retained",
       dailyClass: "machine-pull",
       dailyOwner: "daily-task",
-      legs: ({ m, manifestPath, flags }) => [{
+      legs: ({ m, manifestPath, flags, options }) => [{
         source: "drive",
-        run: () => ingestRemote(m, manifestPath, { ...flags, from: "drive" }),
+        run: () => ingestRemote(m, manifestPath, { ...flags, from: "drive" }, options),
       }],
     },
     ...providerSources,
@@ -17587,6 +17603,7 @@ export function describeLoadResult(result) {
         counts,
         more_history: result.more_history === true,
         ...(result.gmail_quota_paused === true ? { gmail_quota_paused: true } : {}),
+        review_required: result.review_required === true,
         pending_removals: result.pending_removals || 0,
         partial: !!(refused || excluded || incomplete),
         refused,
@@ -17822,6 +17839,7 @@ export async function cmdLoad(manifestPath, options = {}) {
     entry.pending_removals = legResults.reduce((sum, result) => sum + (result.pending_removals || 0), 0);
     entry.more_history = legResults.some(result => result.more_history === true);
     if (legResults.some(result => result.gmail_quota_paused === true)) entry.gmail_quota_paused = true;
+    entry.review_required = legResults.some(result => result.review_required === true);
     entry.counts = legResults.map((r) => r.counts).filter(Boolean);
     entry.countsKnown = legResults.length > 0 && legResults.every((r) => r.known);
     entry.documents = legResults.reduce((n, r) => n + (Number.isFinite(r.documents) ? r.documents : 0), 0);
@@ -17928,6 +17946,7 @@ export async function cmdLoad(manifestPath, options = {}) {
     pending_removals: entries.reduce((sum, entry) => sum + (entry.pending_removals || 0), 0),
     more_history: entries.some(entry => entry.more_history === true),
     ...(entries.some(entry => entry.gmail_quota_paused) ? { gmail_quota_paused: true } : {}),
+    review_required: entries.some(entry => entry.review_required === true),
     removal_reviews: entries.flatMap(entry => entry.removal_reviews || []),
     auto_applied_removals: entries.flatMap(entry => entry.auto_applied_removals || []),
   };
@@ -17955,7 +17974,7 @@ export async function cmdLoad(manifestPath, options = {}) {
   }
   // Daily refresh independently verifies each durable success timestamp. Let
   // measured file omissions reach that check without claiming a full sweep.
-  const incompleteRefresh = entries.some((entry) => entry.status === "partial" && !entry.refreshSucceeded);
+  const incompleteRefresh = entries.some((entry) => entry.status === "partial" && !entry.refreshSucceeded && !entry.review_required);
   const unexpectedPartial = entries.some(entry => entry.status === "partial" && !entry.gmail_quota_paused);
   if (unavailableCount || (!dryRun && partialCount &&
       (options.allowPartialRefresh !== true ? unexpectedPartial :
@@ -18337,7 +18356,7 @@ const cmdIngestRemoteRun = async (
         acknowledgeOcr: (requestIds) => acknowledgeStoredOcrPages({ base, adminKey, requestIds, assertOwned: assertLockOwned }),
         receipt: (receipt) => recordSourceReceipt({ ...receipt, run_id: incrementalRunId }),
         base, adminKey, statePath, assertOwned: assertLockOwned, flags,
-        now: options.driveNow ?? Date.now, limits: options.driveLimits,
+        now: options.driveNow ?? Date.now, deadlineAt: options.ingestDeadlineAt, limits: options.driveLimits,
         readDriveFamily: options.readDriveFamily, readCurrentParts: options.readCurrentIngestParts, request: http,
         isOwnerRemoved: async (uid) => (await (options.listOwnerRemovedFamilies ?? listOwnerRemovedFamilies)(
           { base, adminKey, source: sourceName, uids: [uid] })).has(uid),

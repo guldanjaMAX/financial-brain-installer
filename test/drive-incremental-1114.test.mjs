@@ -4,11 +4,13 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, symlinkSync, lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdIngestRemote, credentialScannerFingerprint, describeLoadResult } from "../brain.mjs";
+import { cmdIngestRemote, cmdLoad, credentialScannerFingerprint, describeLoadResult } from "../brain.mjs";
 import { planDailyRefresh } from "../operations/daily-refresh-plan.mjs";
 import { runDailyRefresh } from "../operations/daily-refresh-run.mjs";
+import { dailyObservationStatus, observeDailyRun, renderDailyObservation } from "../operations/daily-refresh-observation.mjs";
 import * as drive from "../connectors/google-drive.mjs";
 import { batchStream, splitOversized, prefetch, loadState as realLoadState, saveState as realSaveState } from "../ingest/run.mjs";
+import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
 
 globalThis.fetch = async () => { throw new Error("unexpected network attempt"); };
 const stamp = "2026-11-01T00:00:00.000Z";
@@ -17,7 +19,7 @@ const file = (id, parent = "reviewed", extra = {}) => ({ id, name: `${id}.txt`,
   mimeType: "text/plain", parents: [parent], size: String(content.length), modifiedTime: stamp, ...extra });
 const folder = (id, parent) => ({ id, name: id, mimeType: drive.FOLDER_MIME, parents: parent ? [parent] : [] });
 
-function harness({ state = {}, pages = {}, entries = [], fault = null } = {}) {
+function harness({ state = {}, pages = {}, entries = [], fault = null, compactSaves = false } = {}) {
   state = { version: 1, done: {}, skipped: {}, credential_scanner_fingerprint: credentialScannerFingerprint(true), ...state };
   const calls = [], sent = [], receipts = [], saves = [];
   const byId = new Map([folder("reviewed", "account-root"), folder("account-root"),
@@ -53,7 +55,9 @@ function harness({ state = {}, pages = {}, entries = [], fault = null } = {}) {
     resolveBaseUrl: async () => "https://owner.invalid", resolveAdminKey: () => readFileSync(fixtureKeyPath, "utf8"),
     withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
     ingestLib: async () => ({ batchStream, splitOversized, prefetch, loadState: () => state,
-      saveState: (_path, value) => saves.push(structuredClone(value)) }),
+      saveState: (_path, value) => saves.push(structuredClone(compactSaves
+        ? { sync_token: value.sync_token, drive_change_page: value.drive_change_page && { offset: value.drive_change_page.offset } }
+        : value)) }),
     sendBatches: async ({ groups, onResult }) => {
       const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
       for (const item of groups.flat()) { sent.push(item.envelope); tally.created++; onResult?.(item, { status: "created" }); }
@@ -77,6 +81,220 @@ function harness({ state = {}, pages = {}, entries = [], fault = null } = {}) {
   return { state, calls, sent, receipts, saves, options, manifest, manifestPath,
     run: (flags = {}) => cmdIngestRemote(manifest, manifestPath, { from: "drive", ...flags }, options) };
 }
+
+async function dailyDrive(h, now = () => Date.parse(stamp), laterSources = []) {
+  const prior = "2026-10-01T00:00:00.000Z";
+  return runDailyRefresh({
+    plan: { ready: true, enabled: true, identity: { id: "v1-drivecatchup" }, max_runtime_minutes: 45,
+      sources: [{ key: "google_drive", source_names: ["drive"], run_key: "google_drive",
+        class: "machine-pull", owner: "daily-task", status: "ready" }, ...laterSources] },
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: (source, lease) => cmdLoad(h.manifestPath, {
+      flags: { only: source.run_key }, lifecycleLockHeld: true, allowPartialRefresh: true,
+      ingestDeadlineAt: lease.deadlineAt, log() {},
+      probes: { google_drive: async () => ({ connected: true }) },
+      commands: { ingestRemote: (manifest, path, flags, options) =>
+        cmdIngestRemote(manifest, path, flags, { ...options, ...h.options, driveNow: now }) },
+    }),
+    readFreshness: async () => {
+      const receipt = h.receipts.at(-1);
+      const accepted = h.receipts.findLast(row => row.status === "ready" && row.docs_added > 0);
+      return { drive: { kind: "drive", last_successful_run_at: accepted?.completed_at || prior,
+        latest_run: receipt && { ...receipt, metrics_version: 1, finished_at: receipt.completed_at,
+          outcome: receipt.status === "error" ? "failed" : receipt.docs_added > 0 ? "complete" : "empty" } } };
+    },
+    now: () => new Date(now()),
+  });
+}
+
+function driveBacklog(pages) {
+  return { ...Object.fromEntries(Array.from({ length: pages }, (_, index) => [
+    `page-${index}`,
+    { changes: Array.from({ length: 50 }, (_, offset) => {
+      const id = `file-${index}-${offset}`;
+      return { fileId: id, file: file(id) };
+    }), ...(index + 1 === pages ? { newStartPageToken: "caught-up" } : { nextPageToken: `page-${index + 1}` }) },
+  ])), "caught-up": { changes: [], newStartPageToken: "caught-up" } };
+}
+
+for (const pageCount of [10, 1]) {
+  test(`daily Drive finishes ${pageCount * 50} changes in one run`, async () => {
+    const h = harness({ state: { sync_token: "page-0" }, pages: driveBacklog(pageCount), compactSaves: true });
+    const daily = await dailyDrive(h);
+    assert.equal(daily.status, "complete");
+    assert.deepEqual(h.calls.filter(call => call.id === "changes" && call.page !== "caught-up")
+      .map(call => call.page), Array.from({ length: pageCount }, (_, index) => `page-${index}`));
+    assert.equal(h.sent.length, pageCount * 50);
+    assert.equal(h.saves.at(-1).sync_token, "caught-up");
+    const windows = h.receipts.filter(receipt => receipt.status === "indexing").length;
+    if (pageCount === 1) assert.equal(windows, 1);
+    else assert.ok(windows > pageCount / 2, "bounded D1 rechecks finish after the feed");
+  });
+}
+
+test("daily Drive runtime budget saves the page and stops between files", async () => {
+  const pages = driveBacklog(2);
+  const expected = ["page-0", "page-1"].flatMap(page => pages[page].changes.map(change => change.fileId));
+  const h = harness({ state: { sync_token: "page-0" }, pages });
+  let elapsed = 0;
+  const send = h.options.sendBatches;
+  h.options.sendBatches = async (args) => {
+    const result = await send(args);
+    if (h.sent.length === 50) elapsed = 45 * 60_000 - 1000;
+    if (h.sent.length === 57) elapsed = 45 * 60_000;
+    return result;
+  };
+  const daily = await dailyDrive(h, () => Date.parse(stamp) + elapsed, [
+    { key: "gmail", run_key: "gmail", class: "machine-pull", owner: "daily-task", status: "ready" },
+  ]);
+  assert.equal(daily.status, "partial");
+  assert.equal(daily.sources[0].status, "deferred");
+  assert.equal(daily.sources[0].reason_code, "drive_continuation_budget");
+  assert.equal(daily.sources[1].status, "deferred");
+  assert.deepEqual(h.sent.map(doc => doc.source_id), expected.slice(0, 57));
+  assert.equal(h.saves.at(-1).sync_token, "page-1");
+  assert.equal(h.saves.at(-1).drive_change_page.offset, 7);
+  assert.equal(h.receipts.at(-1).walk_complete, false);
+  assert.equal(h.receipts.at(-1).status, "ready");
+  const next = harness({ state: JSON.parse(JSON.stringify(h.saves.at(-1))), pages });
+  const resumed = await dailyDrive(next, () => Date.parse(stamp) + elapsed + 60_000);
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(next.sent.map(doc => doc.source_id), expected.slice(57));
+  assert.equal(next.saves.at(-1).sync_token, "caught-up");
+});
+
+test("daily Drive with 13 of 100 changes accepted reports catching up until exact resume", async t => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  const cutoff = Date.now() - 60_000;
+  const post = async (path, body) => {
+    const response = await fixture.post(path, body, { "X-Admin-Key": fixture.env.ADMIN_KEY });
+    assert.equal(response.status, 200, path);
+    return response.json();
+  };
+  const record = receipt => post("/api/admin/brain/source-receipt", receipt);
+  const prior = new Date(cutoff - 12 * 3600_000).toISOString();
+  await post("/api/admin/brain/source-expectation", {
+    source: "drive", kind: "drive", expected_refresh_seconds: 86400,
+  });
+  await record({ source: "drive", kind: "drive", lane: "incremental", status: "ready",
+    run_id: "prior-check", started_at: prior, completed_at: prior, walk_complete: true,
+    provider_check_complete: true, files_seen: 1, docs_added: 1, docs_refused: 0, docs_failed: 0 });
+  const inventory = async () => (await post("/api/admin/brain/sources", {})).sources.find(row => row.name === "drive");
+  const gaps = async () => (await post("/api/rag/unified", { q: "synthetic notes", limit: 5, rerank: 0 }))
+    .gaps?.filter(gap => gap.source === "drive") || [];
+  const pages = driveBacklog(2);
+  const h = harness({ state: { sync_token: "page-0" }, pages });
+  let now = cutoff - 45 * 60_000;
+  const send = h.options.sendBatches;
+  h.options.sendBatches = async args => {
+    const result = await send(args);
+    if (h.sent.length === 13) now = cutoff;
+    return result;
+  };
+  const daily = await dailyDrive(h, () => now);
+  assert.equal(daily.sources[0].status, "deferred");
+  const receipt = h.receipts.at(-1);
+  assert.equal(receipt.docs_added, 13);
+  assert.equal(receipt.walk_complete, false);
+  assert.equal(receipt.provider_check_complete, false);
+  await record({ ...receipt, run_id: "cutoff-check" });
+  const pending = await inventory();
+  assert.equal(pending.freshness.state, "stale");
+  assert.equal(pending.receipt.latest_run.docs_added, 13);
+  assert.equal(pending.receipt.last_successful_run_at, new Date(cutoff).toISOString());
+  assert.equal(pending.receipt.last_check_at, prior);
+  const pendingGaps = await gaps();
+  assert.ok(pendingGaps.some(gap => gap.type === "coverage_stale" && /checkpoint/i.test(gap.detail)));
+  assert.ok(pendingGaps.every(gap => !["sync_review", "sync_broken"].includes(gap.type)));
+
+  const saved = JSON.parse(JSON.stringify(h.saves.at(-1)));
+  assert.equal(saved.sync_token, "page-0");
+  assert.equal(saved.drive_change_page.offset, 13);
+  await record({ source: "drive", kind: "drive", lane: "incremental", status: "indexing",
+    run_id: "completed-check", started_at: new Date(cutoff + 60_000).toISOString() });
+  assert.equal((await inventory()).freshness.state, "stale");
+  assert.ok((await gaps()).some(gap => gap.type === "coverage_stale" && /checkpoint/i.test(gap.detail)));
+  const next = harness({ state: saved, pages });
+  const resumed = await dailyDrive(next, () => cutoff + 60_000);
+  assert.equal(resumed.status, "complete");
+  assert.equal(next.saves.at(-1).sync_token, "caught-up");
+  assert.deepEqual([...h.sent, ...next.sent].map(doc => doc.source_id),
+    ["page-0", "page-1"].flatMap(page => pages[page].changes.map(change => change.fileId)));
+  await record({ ...next.receipts.at(-1), run_id: "completed-check" });
+  const completed = await inventory();
+  assert.equal(completed.freshness.state, "ok");
+  assert.equal(completed.receipt.last_check_at, new Date(cutoff + 60_000).toISOString());
+  assert.ok((await gaps()).every(gap => gap.type !== "coverage_stale"));
+});
+
+test("daily Drive emits a resumable receipt when the page read consumes the budget", async () => {
+  const h = harness({ state: { sync_token: "page-0" }, pages: driveBacklog(1) });
+  let elapsed = 0;
+  const listPage = h.options.drive.listChangePage;
+  h.options.drive = { ...h.options.drive, listChangePage: async (...args) => {
+    const page = await listPage(...args);
+    elapsed = 45 * 60_000;
+    return page;
+  } };
+  const daily = await dailyDrive(h, () => Date.parse(stamp) + elapsed);
+  assert.equal(daily.sources[0].status, "deferred");
+  assert.equal(h.saves.at(-1).drive_change_page.offset, 0);
+  assert.equal(h.sent.length, 0);
+  const receipt = h.receipts.at(-1);
+  assert.equal(receipt.checkpoint_pending, true);
+  assert.equal(receipt.status, "ready");
+  assert.equal(receipt.walk_complete, false);
+  assert.equal(receipt.complete_sweep, false);
+  assert.equal(receipt.provider_check_complete, false);
+  assert.deepEqual([receipt.docs_added, receipt.docs_updated, receipt.docs_unchanged,
+    receipt.docs_failed, receipt.docs_refused], [0, 0, 0, 0, 0]);
+  assert.equal(receipt.issue_code, undefined);
+});
+
+for (const kind of ["removal", "missing ID", "both", "both with a failure"]) {
+  test(`daily Drive records one owner review for ${kind}`, async () => {
+    const extraFailure = kind === "both with a failure";
+    const changes = [
+      ...(kind !== "missing ID" ? [{ fileId: "retained", removed: true }] : []),
+      ...(kind !== "removal" ? [{ removed: true }] : []),
+    ];
+    const h = harness({
+      state: { sync_token: "page-0", done: { "drive:retained": "prior-version" },
+        ...(extraFailure ? { drive_failures: { "drive:failed": { id: "failed", code: "download_limit" } } } : {}) },
+      pages: extraFailure ? { "page-0": { changes, newStartPageToken: "caught-up" } }
+        : { "page-0": { changes, nextPageToken: "page-1" },
+          "page-1": { changes: [], nextPageToken: "page-2" },
+          "page-2": { changes: [{ fileId: "later", file: file("later") }], newStartPageToken: "caught-up" } },
+    });
+    const daily = await dailyDrive(h);
+    assert.equal(daily.status, extraFailure ? "failed" : "waiting_for_owner");
+    assert.equal(daily.sources.length, 1);
+    if (!extraFailure) assert.equal(daily.sources[0].reason, "Google Drive needs your review.");
+    assert.equal(h.receipts.at(-1).issue_code, extraFailure ? "INGEST_FAILED" : "SAFETY_REVIEW_REQUIRED");
+    assert.equal(h.receipts.at(-1).docs_failed, Number(extraFailure));
+    assert.equal(h.saves.at(-1).sync_token, "caught-up");
+    assert.deepEqual(h.sent.map(doc => doc.source_id), extraFailure ? [] : ["later"]);
+    assert.equal(h.state.done["drive:retained"], "prior-version");
+    assert.equal(Object.values(h.state.drive_failures).filter(failure => failure.code === "invalid_change_identity").length,
+      Number(kind !== "removal"));
+  });
+}
+
+test("daily Drive observation asks for review without assuming a removal", async () => {
+  const plan = { identity: { id: "v1-drivecatchup" } };
+  const options = { home: mkdtempSync(join(tmpdir(), "drive-daily-observation-")) };
+  await observeDailyRun(plan.identity, async () => ({
+    status: "waiting_for_owner", reason_code: "drive_owner_review",
+  }), options);
+  const schedule = dailyObservationStatus(plan, { enabled: false }, {}, true, options);
+  assert.equal(schedule.reason_code, "drive_owner_review");
+  const lines = [];
+  renderDailyObservation(schedule, line => lines.push(line));
+  assert.deepEqual(lines.filter(line => /review|error/u.test(line)), ["Last daily result: needs your review"]);
+  await observeDailyRun(plan.identity, async () => ({ status: "complete" }), options);
+  assert.equal(dailyObservationStatus(plan, { enabled: false }, {}, true, options).last_error_line, null);
+});
 
 test("first run seeds a token without a mirror walk or inventory and preserves indexed documents", async () => {
   const h = harness({ state: { done: { "drive:existing": "prior-version" } } });
@@ -508,14 +726,17 @@ test("a resumed page cannot download a file that has since moved out of scope", 
 
 test("a file no longer returned by metadata lookup is retained for review without holding later additions", async () => {
   const h = harness({ state: { sync_token: "old-page", done: { "drive:missing": "prior-version" } }, pages: { "old-page": {
-    changes: [file("missing"), file("control")].map((f) => ({ fileId: f.id, file: f })), newStartPageToken: "done-page" } } });
+    changes: [{ fileId: "missing", file: file("missing") }], nextPageToken: "next-page" },
+  "next-page": { changes: [], nextPageToken: "last-page" },
+  "last-page": { changes: [{ fileId: "control", file: file("control") }], newStartPageToken: "done-page" } } });
   const connector = h.options.drive;
   let reached = 0;
   h.options.drive = { ...connector, getFileMetadata: async (get, id) => {
     if (id === "missing") { reached++; throw new drive.DriveError("file not returned", 404, "notFound"); }
     return connector.getFileMetadata(get, id);
   } };
-  const result = await h.run();
+  const daily = await dailyDrive(h);
+  const result = h.state.drive_incremental_last_run;
   assert.equal(reached, 1, "current metadata decision reached");
   assert.deepEqual(h.sent.map((e) => e.source_id), ["control"]);
   assert.equal(h.state.done["drive:missing"], "prior-version");
@@ -524,6 +745,11 @@ test("a file no longer returned by metadata lookup is retained for review withou
   assert.equal(h.state.sync_token, "done-page");
   assert.equal(result.feed_caught_up, true);
   assert.equal(result.complete, false);
+  assert.deepEqual(daily.sources.map(source => [source.status, source.reason]), [
+    ["waiting_for_owner", "Google Drive needs your review."],
+  ]);
+  assert.equal(h.receipts.at(-1).issue_code, "SAFETY_REVIEW_REQUIRED");
+  assert.equal(h.receipts.at(-1).docs_failed, 0);
 });
 
 for (const [label, bytes] of [["malformed JSON", "{"], ["missing done", JSON.stringify({ sync_token: "prior-page" })],

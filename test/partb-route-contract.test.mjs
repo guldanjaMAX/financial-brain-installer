@@ -51,6 +51,7 @@ import {
 } from "../worker/src/lib/install-smoke.js";
 import { applyMoneyVeto, isMoneyQuestion } from "../worker/src/lib/money-veto.js";
 import { createQueryTiming } from "../worker/src/lib/query-timing.js";
+import { createMcpQueryTiming, partBRouteReceiptFromTiming } from "../components/brain-mcp-timing.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PART_B_PROOF_MODULE = new URL("../operations/answer-route-proof.mjs", import.meta.url);
@@ -215,7 +216,7 @@ function installSmokeThinkEnvironment() {
   return { env, calls };
 }
 
-async function askInstallSmoke(question) {
+async function askInstallSmoke(question, bindings = {}) {
   const state = installSmokeThinkEnvironment();
   const response = await worker.fetch(new Request("https://fixture.invalid/api/rag/think", {
     method: "POST",
@@ -224,7 +225,7 @@ async function askInstallSmoke(question) {
       "X-Admin-Key": FIXTURE_ADMIN_KEY,
     },
     body: JSON.stringify({ q: question }),
-  }), state.env, { waitUntil() {}, passThroughOnException() {} });
+  }), { ...state.env, ...bindings }, { waitUntil() {}, passThroughOnException() {} });
   return { ...state, response, body: await response.json() };
 }
 
@@ -970,6 +971,23 @@ test("Part B control survives the real Worker evidence, premise, and money gates
   assertDocumentAnswer(green.body, { expected: INSTALL_SMOKE_ANSWER, exact: true });
   assert.equal(green.body.evidence_gate.supported, true, green.body.evidence_gate.reason);
   assert.equal(green.body.timing.outcome, "ok");
+  t.mock.method(globalThis, "fetch", async (url, request) => {
+    assert.equal(url, "https://api.anthropic.com/v1/messages");
+    const { model } = JSON.parse(request.body);
+    assert.ok(["claude-opus-5-5", "claude-sonnet-5-5"].includes(model));
+    const text = model === "claude-opus-5-5" ? INSTALL_SMOKE_ANSWER :
+      JSON.stringify({ supported: true, complete: true, evidence: [1], reason: "direct support" });
+    return Response.json({ content: [{ type: "text", text }], usage: {} });
+  });
+  const updated = await askInstallSmoke(PART_B_ROUTE_CONTROL.arguments.q, {
+    ANSWER_MODEL: RECOMMENDED_ANSWER_SETUP.answer_model,
+    GATE_MODEL: RECOMMENDED_ANSWER_SETUP.gate_model,
+    ANTHROPIC_API_KEY: "fixture-not-a-credential",
+  });
+  const localTiming = createMcpQueryTiming({ route: "mcp.brain_think" });
+  await localTiming.backend(async () => updated.body);
+  assert.deepEqual(partBRouteReceiptFromTiming(localTiming.finish()), EXPECTED_ROUTE_RECEIPT,
+    "the deployed Worker modules record both model calls on the actual route");
   assert.equal(green.body.citations.length, 1);
   assert.equal(green.body.gaps.some((gap) =>
     ["money_veto", "money_recall", "temporal_conflict"].includes(gap.type)), false);

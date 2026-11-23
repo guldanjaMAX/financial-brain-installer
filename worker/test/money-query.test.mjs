@@ -739,12 +739,32 @@ test('owner passkey session authorizes SQL, while missing CSRF, revoked devices 
   assert.equal(f.calls.filter(sql => /SELECT \* FROM \(/.test(sql)).length, before, 'refused sessions never prepare the money read');
 });
 
+test('unconfirmed historical SimpleFIN amounts cap otherwise High scoped confidence at 69', async t => {
+  const { queryMoney } = await import(modulePath);
+  const f = overviewFixture(t);
+  f.account('deposit', 'manual', 'checking', 'KWD');
+  f.coverage('deposit', '2025-12-01', '2025-12-31');
+  f.row('posted', 'deposit', '2025-12-10', 78931, 'outflow', { currency:'KWD', description:'Packaging purchase' });
+  f.run("UPDATE fin_transactions SET payee='Supply vendor', category='OFFICE_SUPPLIES', category_basis_state='confirmed', source_provider='simplefin', source_locator='bank-feed:fixture~simplefin-exact-minor-v1#transaction'");
+  const sql = "SELECT SUM(amount_minor) AS paid FROM txn WHERE posted_on BETWEEN '2025-12-01' AND '2025-12-31' AND account_slug='deposit' AND currency='KWD' AND direction='outflow'";
+  const ask = () => queryMoney(f.env, { sql }, { now: () => Date.parse('2025-12-31T18:00:00Z') });
+  const control = await ask();
+  assert.equal(control.rows[0].paid, 78931);
+  assert.ok(control.confidence.percent >= 90, control.confidence_text);
+  f.run("UPDATE fin_transactions SET amount_minor=7893, source_locator='bank-feed:legacy#transaction'");
+  const historical = await ask();
+  assert.equal(historical.rows[0].paid, 7893);
+  assert.match(historical.confidence_text, /SimpleFIN KWD transactions.*unconfirmed/);
+  assert.ok(historical.confidence.percent <= 69, historical.confidence_text);
+});
+
 test('guard rejects each write, schema, statement and table bypass before executing submitted SQL', async t => {
   const { queryMoney, MONEY_TABLES } = await import(modulePath);
   const f = fixture(t);
   assert.equal((await queryMoney(f.env, { sql: 'SELECT count(*) AS n FROM fin_transactions' })).rows[0].n, 0);
-  assert.equal(f.calls.length,9,'catalogue, two compilation proofs, raw budget, owner execution, optional clean budget/pairing/snapshot and health');
-  assert.match(f.calls[4],/mq_budget AS MATERIALIZED/);assert.match(f.calls[5],/^SELECT count\(\*\) AS n/);assert.match(f.calls[7],/snapshot_kind/);
+  assert.equal(f.calls.length,9,'catalogue, two compilation proofs, raw budget, owner execution with fixed SimpleFIN evidence, optional clean budget/pairing/snapshot and health');
+  assert.match(f.calls[4],/FROM main\.fin_transactions t[\s\S]*t\.source_provider='simplefin'[\s\S]*mq_budget AS MATERIALIZED/);
+  assert.match(f.calls[5],/^SELECT count\(\*\) AS n/);assert.match(f.calls[7],/snapshot_kind/);
   assert.match(f.calls.at(-1), /FROM bank_feed_items i LEFT JOIN bank_feed_health/, 'health access stays in the fixed private projection');
   const denied = [
     'UPDATE fin_transactions SET pending=1', 'SELECT 1; SELECT 2', 'PRAGMA table_info(fin_accounts)',
@@ -967,6 +987,9 @@ test('transaction inputs have an inner budget and oversized scans fail before th
     assert.ok(f.calls.some(sql=>sql.includes('mq_result')));
   }
   assert.equal((await queryMoney(f.env, { sql }, { maxScanRows: 3 })).rows[0].total, 70, 'configured budget green control');
+  const linkProbe = await queryMoney(f.env, { sql: 'SELECT 1 AS link_probe FROM fin_accounts LIMIT 1', max_rows: 1 }, options);
+  assert.equal(linkProbe.row_count, 1);
+  assert.equal(linkProbe.rows[0].link_probe, 1, 'the reconnect check reads no money amounts');
 });
 
 test('indexed raw date and id bounds admit complete slices and cannot hide an oversized scan', async t => {
@@ -1034,12 +1057,17 @@ test('an ingest between budget probe and execution cannot return a partial aggre
   assert.equal((await queryMoney(f.env, { sql: 'SELECT sum(amount_minor) AS total FROM fin_transactions' }, { maxScanRows: 1 })).rows[0].total, 10);
   const prepare = f.env.DB.prepare;
   let raced = 0;
+  const guardedReads = [];
   f.env.DB.prepare = sql => {
-    if (sql.startsWith('SELECT * FROM (\n')) { raced++; f.row('concurrent', 'selected', '2026-09-02', 20); }
+    if (sql.startsWith('SELECT * FROM (\n')) {
+      guardedReads.push(sql);
+      if (++raced === 1) f.row('concurrent', 'selected', '2026-09-02', 20);
+    }
     return prepare(sql);
   };
   await assert.rejects(queryMoney(f.env, { sql: 'SELECT sum(amount_minor) AS total FROM fin_transactions' }, { maxScanRows: 1 }), e => e.code === 'MONEY_QUERY_UNAVAILABLE');
-  assert.equal(raced, 1, 'same-statement overflow sentinel actually ran after the input changed');
+  assert.equal(raced, 2, 'same-statement overflow sentinel runs on the receipt read and its one amount-only retry');
+  assert.ok(guardedReads[0].includes(guardedReads[1]), 'the retry preserves the identical guarded amount SQL');
   f.env.DB.prepare = prepare;
   assert.equal((await queryMoney(f.env, { sql: 'SELECT sum(amount_minor) AS total FROM fin_transactions' }, { maxScanRows: 2 })).rows[0].total, 30,
     'a complete configured input still returns the full total');

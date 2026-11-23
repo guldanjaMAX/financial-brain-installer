@@ -436,12 +436,19 @@ test("legacy durable SimpleFIN object artifacts fail closed at status and page b
   const statusBody = await simpleFinFeedStatus(fixture.env);
   assert.ok(fixture.seen.sql.slice(before).some(sql => /last_errlist_json/.test(sql)),
     "the directly seeded durable status decision ran without maintenance");
-  assert.deepEqual(statusBody.connections[0]?.provider_errors,
-    legacyArtifacts.map(() => "SimpleFIN reported an issue without readable details."));
+  const unreadable = "SimpleFIN reported an issue without readable details.";
+  assert.deepEqual(statusBody.connections[0]?.provider_errors, [unreadable]);
+  assert.deepEqual(statusBody.connections[0]?.provider_issues, [{ kind: "blocking", text: unreadable }]);
   const { calls, rendered } = await renderConnectionStatus(statusBody);
   assert.ok(calls.includes("/api/bank-feed/status"), "the owner page rendered the real status response");
   assert.ok(rendered.includes("SimpleFIN reported an issue without readable details."));
   assert.equal(rendered.some(value => value.includes("[object Object]")), false);
+  for (const artifact of legacyArtifacts) {
+    fixture.raw("UPDATE simplefin_connections SET last_errlist_json=? WHERE item_ref='legacy-feed'",
+      JSON.stringify([artifact]));
+    assert.deepEqual((await simpleFinFeedStatus(fixture.env)).connections[0]?.provider_issues,
+      [{ kind: "blocking", text: unreadable }]);
+  }
 
   fixture.raw(`UPDATE simplefin_connections SET last_errlist_json=? WHERE item_ref='legacy-feed'`,
     JSON.stringify(["Readable string control."]));
@@ -469,6 +476,7 @@ test("SimpleFIN provider objects remain readable through maintenance, status, an
     { entry: ["nested provider issue"], expected: unreadable },
     { entry: 17, expected: unreadable },
   ];
+  let entries = providerCases.map(row => row.entry);
   let providerPulls = 0;
   const fetchImpl = async (input) => {
     const request = new Request(input);
@@ -476,7 +484,7 @@ test("SimpleFIN provider objects remain readable through maintenance, status, an
     providerPulls++;
     return Response.json({
       accounts: [],
-      errlist: providerCases.map(row => row.entry),
+      errlist: entries,
     });
   };
   await claimSimpleFinAccess(fixture.env, {
@@ -492,12 +500,14 @@ test("SimpleFIN provider objects remain readable through maintenance, status, an
   });
   assert.equal(providerPulls, 1, "the provider message-shape decision point ran through real staging");
   assert.equal(maintenance.items[0]?.partial, true);
-  const expectedErrors = providerCases.map(row => row.expected);
-  const storedErrors = JSON.parse(fixture.first("SELECT last_errlist_json FROM simplefin_connections").last_errlist_json);
-  assert.deepEqual(storedErrors, expectedErrors, "stored provider issues are already readable");
+  const expectedErrors = [...new Set(providerCases.map(row => row.expected))];
+  const expectedIssues = expectedErrors.map(text => ({ kind: "blocking", text }));
+  const storedIssues = JSON.parse(fixture.first("SELECT last_errlist_json FROM simplefin_connections").last_errlist_json);
+  assert.deepEqual(storedIssues, expectedIssues, "stored provider issues are readable, deduplicated, and typed");
   const statusBody = await simpleFinFeedStatus(fixture.env);
   assert.deepEqual(statusBody.connections[0]?.provider_errors, expectedErrors,
     "the status boundary preserves readable provider issues");
+  assert.deepEqual(statusBody.connections[0]?.provider_issues, expectedIssues);
 
   const { calls, rendered } = await renderConnectionStatus(statusBody);
   assert.ok(calls.includes("/api/bank-feed/status"), "the real connection-status rendering decision ran");
@@ -505,4 +515,17 @@ test("SimpleFIN provider objects remain readable through maintenance, status, an
   assert.ok(rendered.includes("String control."), "string provider messages remain a green control");
   assert.ok(rendered.includes("SimpleFIN reported an issue without readable details."));
   assert.equal(rendered.includes("[object Object]"), false);
+  for (const [index, { entry, expected }] of providerCases.entries()) {
+    entries = [entry];
+    const before = providerPulls;
+    const result = await runSimpleFinMaintenance(fixture.env, {
+      fetchImpl,
+      now: new Date(Date.UTC(2026, 9, 30 + index, 12)).toISOString(),
+      maxRequestsPerItem: 1,
+    });
+    assert.equal(providerPulls, before + 1, "each provider shape reached staging");
+    assert.equal(result.items[0]?.partial, true);
+    assert.deepEqual((await simpleFinFeedStatus(fixture.env)).connections[0]?.provider_issues,
+      [{ kind: "blocking", text: expected }]);
+  }
 });

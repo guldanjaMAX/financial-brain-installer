@@ -120,6 +120,22 @@ const negativeArms = [
   { label: "refusal reason", kind: "gmail", refusal_reason: "synthetic refusal" },
   { label: "reversed clock", kind: "imessage", started_at: "2026-07-07T09:00:00.000Z" },
 ];
+
+test("a saved Drive checkpoint keeps prior freshness and does not ask for owner review", async t => {
+  const f = await scenario(t, { cadence: 604800, walk_complete: false,
+    provider_check_complete: false, checkpoint_pending: true });
+  assert.equal(f.row.last_ingest_at, ACCEPTED);
+  assert.equal(f.row.last_complete_sweep_at, f.before.last_complete_sweep_at);
+  assert.equal(f.item.receipt.last_successful_run_at, ACCEPTED);
+  assert.equal(f.item.receipt.last_check_at, ACCEPTED);
+  assert.equal(f.run.finished_at, Date.parse(FINISHED));
+  assert.equal(f.run.docs_added, 0);
+  assert.equal(f.fresh.state, "stale");
+  assert.equal(f.item.freshness.state, "stale");
+  assert.ok(f.gaps.some(g => g.type === "coverage_stale" && /checkpoint/i.test(g.detail) && g.remedy === "No action needed."));
+  assert.ok(f.gaps.every(g => !["sync_review", "sync_broken"].includes(g.type)));
+  assert.deepEqual(await sourceFreshnessCounts(f.fixture.env, { now: f.now }), { total: 1, stale: 1, unscheduled: 0 });
+});
 for (const { label, expected = "review", ...arm } of negativeArms) {
   test(`${label} retains its existing flagged state`, async t => {
     const f = await scenario(t, arm);

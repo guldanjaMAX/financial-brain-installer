@@ -37,7 +37,7 @@ function backendTiming() {
   return timing.finish("ok");
 }
 
-async function fixture(t, label, { withServer = true } = {}) {
+async function fixture(t, label, { withServer = true, worker = { timing: backendTiming } } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), `${label}-`)));
   if (process.platform === "win32") {
     // Exercise the real default writer against a guide inside its scratch profile.
@@ -63,6 +63,14 @@ async function fixture(t, label, { withServer = true } = {}) {
     }));
     response.writeHead(200, { "Content-Type": "application/json" });
     if (request.url === "/api/admin/brain/money-query") {
+      if (worker.moneyUnavailable) {
+        response.end(JSON.stringify({ error: "Synthetic money query failure." }));
+        return;
+      }
+      if (body.sql === "SELECT 1 AS link_probe FROM fin_accounts LIMIT 1" && body.max_rows === 1) {
+        response.end(JSON.stringify({ rows: [{ link_probe: 1 }], row_count: 1 }));
+        return;
+      }
       response.end(JSON.stringify({ rows: [{ amount_cents: 125 }], row_count: 1 }));
       return;
     }
@@ -73,10 +81,12 @@ async function fixture(t, label, { withServer = true } = {}) {
     response.end(JSON.stringify({
       mode: "think",
       answer: "The fixed control completed. [1]",
+      status: worker.status,
       citations: [{ n: 1 }],
       results: [],
       evidence_gate: { supported: true },
-      timing: backendTiming(),
+      timing: worker.timing?.(),
+      answer_error: worker.answerError,
     }));
   }) : null;
   if (server) {
@@ -93,7 +103,7 @@ async function fixture(t, label, { withServer = true } = {}) {
     manifest_version: 1,
     client: { slug: "fixture", display_name: "Owner", timezone: "UTC" },
     brain: {
-      version: "0.4.27",
+      version: worker.version ?? "0.4.27",
       worker_name: "fixture-brain",
       domain: server ? `http://127.0.0.1:${server.address().port}` : "fixture.invalid",
     },
@@ -247,6 +257,130 @@ test("installed defaults refuse one running Claude Code process without spawn or
   t.diagnostic("apply=1 process_queries=1 child_spawns=0 retries=0 fixed_cards=1");
 });
 
+test("ordinary reconnect retains the money link with partial coverage and no backend route timing", async (t) => {
+  const worker = { version: "0.4.31", status: "coverage_incomplete" };
+  const state = await fixture(t, "reconnect-missing-receipt", { worker });
+  const domain = JSON.parse(readFileSync(state.manifest)).brain.domain;
+  const desired = mcpRegistrationDescriptor({ client: { slug: "fixture" } }, state.manifest, { baseUrl: domain });
+  const config = join(state.root, ".claude.json");
+  const oldLink = JSON.stringify({ mcpServers: {} });
+  const newLink = JSON.stringify({ mcpServers: {
+    fixture: { type: desired.type, command: desired.command, args: desired.args, env: desired.env },
+  } });
+  writeFileSync(config, oldLink);
+  const apply = await captureConsole(() => cmdMcpConfig(state.manifest, {
+    flags: { apply: true },
+    processSnapshot: () => [],
+    wireAgents: async () => {
+      writeFileSync(config, newLink);
+      return { wired: ["Claude Code"], failures: [], skipped: [] };
+    },
+  }));
+  // Model the reconnect wrapper's restore-on-nonzero behavior.
+  if (apply.error) writeFileSync(config, oldLink);
+  assert.equal(apply.error, null);
+  assert.equal(readFileSync(config, "utf8"), newLink);
+  assert.equal(apply.value.route_readiness.ready, false);
+  assert.equal(apply.value.route_readiness.reason, "receipt_missing");
+  assert.equal(apply.output.filter(line => line.includes(
+    "Claude answers are not proven yet. Update my Brain, then say Check my Brain.",
+  )).length, 1);
+  assert.deepEqual(state.requests.map(request => request.path), [
+    "/api/rag/think", "/api/admin/brain/money-query",
+  ]);
+
+  worker.timing = () => ({ ...backendTiming(), route: "unified" });
+  const options = {
+    processSnapshot: () => [],
+    wireOptions: { claudeConfigPath: config },
+  };
+  const failedRetry = await captureConsole(() => resumeClaudeRouteAfterCommand("health", [state.manifest], options));
+  assert.equal(failedRetry.error, null);
+  assert.equal(failedRetry.value?.reason, "receipt_unrecognized");
+  assert.equal(failedRetry.output.filter(line => line.includes("Claude answer route not ready: receipt_unrecognized.")).length, 1);
+  assert.deepEqual(state.requests.map(request => request.path), [
+    "/api/rag/think", "/api/admin/brain/money-query", "/api/rag/think",
+  ]);
+
+  worker.status = undefined;
+  worker.timing = backendTiming;
+  const retry = await captureConsole(() => resumeClaudeRouteAfterCommand("health", [state.manifest], options));
+  assert.equal(retry.error, null);
+  assert.equal(retry.value?.ready, true);
+  assert.equal(retry.value.reason, "route_receipt_accepted");
+  assert.equal(retry.output.filter(line => line.includes("Claude answer route ready: route_receipt_accepted")).length, 1);
+  assert.equal(readFileSync(config, "utf8"), newLink);
+});
+
+test("receipt-free reconnect checks money for a completed answer with or without a coverage warning", async (t) => {
+  let seed = 0x0434c0a7;
+  for (const status of [undefined, "coverage_incomplete"]) {
+    for (const timing of [undefined, () => ({ ...backendTiming(), models: [] })]) {
+      // Use a fixed seed to vary the order of the healthy and unavailable endpoint trials.
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      for (const moneyUnavailable of [Boolean(seed & 1), !Boolean(seed & 1)]) {
+        await t.test(`${status ?? "covered"} / ${timing ? "partial timing" : "no timing"} / ${moneyUnavailable ? "unavailable" : "healthy"}`, async (t) => {
+          const state = await fixture(t, "reconnect-coverage", { worker: { status, timing, moneyUnavailable } });
+          const counters = { apply: 0 };
+          const apply = await installedDefaults(state.manifest, counters, () => []);
+          assert.equal(counters.apply, 1);
+          assert.deepEqual(state.requests.map(({ path }) => path), [
+            "/api/rag/think", "/api/admin/brain/money-query",
+          ]);
+          assert.ok(state.requests.every(({ authorized }) => authorized));
+          if (moneyUnavailable) {
+            assert.match(apply.error?.message ?? "", /Claude answer route not ready: receipt_missing/u);
+            assert.doesNotMatch(apply.output.join("\n"), /Claude answers are not proven yet/u);
+          } else {
+            assert.equal(apply.error, null);
+            assert.equal(apply.value.route_readiness.reason, "receipt_missing");
+            assert.equal(apply.value.route_readiness.ready, false);
+            assert.equal(apply.value.route_readiness.money_link_verified, true);
+          }
+        });
+      }
+    }
+  }
+});
+
+test("ordinary reconnect refuses missing receipts when the money query fails or the answer route reports a fault", async (t) => {
+  const cases = [
+    ["unavailable money tool", { moneyUnavailable: true }, "receipt_missing"],
+    ["unavailable search", { status: "search_unavailable" }, "receipt_missing"],
+    ["withheld answer without timing", { status: "answer_withheld" }, "receipt_missing"],
+    ["answer error", { answerError: "Synthetic answer error." }, "tool_failed"],
+    ["wrong model", { timing: () => {
+      const timing = backendTiming();
+      timing.models[0].id = "claude-sonnet-5-5";
+      return timing;
+    } }, "receipt_unrecognized"],
+    ["fallback route", { timing: () => ({ ...backendTiming(), route: "unified" }) }, "receipt_unrecognized"],
+  ];
+  for (const [label, worker, reason] of cases) {
+    await t.test(label, async (t) => {
+      const state = await fixture(t, "reconnect-route-fault", { worker });
+      const apply = await installedDefaults(state.manifest, { apply: 0 }, () => []);
+      assert.deepEqual(state.requests.map(({ path }) => path), [
+        "/api/rag/think", ...(worker.moneyUnavailable ? ["/api/admin/brain/money-query"] : []),
+      ]);
+      assert.match(apply.error?.message ?? "", new RegExp(`Claude answer route not ready: ${reason}\\.`));
+      assert.doesNotMatch(apply.output.join("\n"), /Claude answers are not proven yet/);
+    });
+  }
+});
+
+test("ordinary reconnect leaves incomplete backend timing pending without evicting the money link", async (t) => {
+  const worker = { timing: () => ({ ...backendTiming(), models: [] }) };
+  const state = await fixture(t, "reconnect-incomplete-timing", { worker });
+  const apply = await installedDefaults(state.manifest, { apply: 0 }, () => []);
+  assert.equal(apply.error, null);
+  assert.equal(apply.value.route_readiness.ready, false);
+  assert.equal(apply.value.route_readiness.reason, "receipt_missing");
+  assert.deepEqual(state.requests.map(request => request.path), [
+    "/api/rag/think", "/api/admin/brain/money-query",
+  ]);
+});
+
 test("approved reconnect defers proof until a later ordinary CLI run", async (t) => {
   const state = await fixture(t, "reconnect-proof");
   const domain = JSON.parse(readFileSync(state.manifest)).brain.domain;
@@ -302,7 +436,11 @@ test("approved reconnect defers proof until a later ordinary CLI run", async (t)
   assert.equal(state.requests.length, 2);
   const registered = readFileSync(config);
   writeFileSync(config, "{}");
-  assert.equal((await resumeClaudeRouteAfterCommand("health", [state.manifest], options)).ready, false);
+  const failedRetry = await captureConsole(() => resumeClaudeRouteAfterCommand("health", [state.manifest], options));
+  assert.equal(failedRetry.error, null);
+  assert.equal(failedRetry.value.ready, false);
+  assert.equal(failedRetry.value.reason, "transport_open_failed");
+  assert.equal(failedRetry.output.filter(line => line.includes("Claude answer route not ready: transport_open_failed.")).length, 1);
   assert.equal(state.requests.length, 2);
   writeFileSync(config, registered);
   const proof = await resumeClaudeRouteAfterCommand("daily", ["run", state.manifest], options);

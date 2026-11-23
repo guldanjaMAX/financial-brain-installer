@@ -66,6 +66,7 @@ const config :Workerd.Config = (services = [
     (name = "worker/src/lib/secret-scan.js", esModule = embed "../../../src/lib/secret-scan.js"),
     (name = "worker/src/lib/sessions.js", esModule = embed "../../../src/lib/sessions.js"),
     (name = "worker/src/lib/simplefin-bank-feed.js", esModule = embed "../../../src/lib/simplefin-bank-feed.js"),
+    (name = "worker/src/lib/simplefin-minor-unit-evidence.js", esModule = embed "../../../src/lib/simplefin-minor-unit-evidence.js"),
     (name = "worker/src/lib/simplefin-reconciliation.js", esModule = embed "../../../src/lib/simplefin-reconciliation.js"),
     (name = "worker/src/lib/simplefin-coverage-review.js", esModule = embed "../../../src/lib/simplefin-coverage-review.js"),
     (name = "worker/src/lib/simplefin-ledger.js", esModule = embed "../../../src/lib/simplefin-ledger.js"),

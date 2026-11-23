@@ -60,6 +60,14 @@ export function driveIncrementalStatus(state = {}) {
 }
 
 const OUTSIDE_WATCHED_FOLDERS = "outside the watched folders";
+const needsIdentityReview = failure => failure.code === "invalid_change_identity" && failure.id === null;
+// Keep both records for recovery. The paired file-unavailable evidence describes the same
+// owner decision and must not count as a second, operational failure.
+function isOwnerReviewFailure(state, uid, failure) {
+  const decision = state.drive_pending_removals?.[uid];
+  return needsIdentityReview(failure) || (failure.code === "file_unavailable" && typeof failure.id === "string" &&
+    decision?.reason === "removed_or_access_lost" && decision.id === failure.id);
+}
 
 export function renderDriveIncrementalStatus(state, display = String) {
   const status = driveIncrementalStatus(state);
@@ -88,7 +96,7 @@ export function renderDriveIncrementalStatus(state, display = String) {
 
 export async function runDriveIncremental({
   drive, getToken, state, save, sourceName, policy, processFile,
-  now = Date.now, limits = {}, retryFailures = false, display = String,
+  now = Date.now, deadlineAt = Infinity, limits = {}, retryFailures = false, display = String,
   validateProgress = async () => true,
   // "Clean my Brain": true when the owner removed this file from the Brain.
   isOwnerRemoved = async () => false,
@@ -123,7 +131,10 @@ export async function runDriveIncremental({
   }
   const result = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0, scanned: 0, skipped: 0,
     complete: false, seeded: false, pages: 0 };
-  const withinBudget = () => result.scanned < budget.maxFiles && now() - started < budget.timeBudgetMs;
+  const windowDeadline = Math.min(deadlineAt, started + budget.timeBudgetMs);
+  const withinBudget = () => result.scanned < budget.maxFiles && now() < windowDeadline;
+  let progressChecked = false;
+  let feedStarted = false;
   const failure = (file, reason, code = "file_failed", retryable = true, details = {}) => {
     const uid = details.key || `${sourceName}:${file.id}`;
     const previous = state.drive_failures[uid];
@@ -259,7 +270,8 @@ export async function runDriveIncremental({
       save();
       return result;
     }
-    const progressChecked = await validateProgress({deadlineAt:started + budget.timeBudgetMs / 3, maxEntries:100});
+    feedStarted = true;
+    progressChecked = await validateProgress({deadlineAt:Math.min(deadlineAt, started + budget.timeBudgetMs / 3), maxEntries:100});
     // Older checkpoints could open this decision for a file we never accepted.
     // Reconcile even on a quiet feed and leave other review reasons intact.
     // Invalidated acceptance leaves a restore obligation, not proof of absence.
@@ -388,6 +400,16 @@ export async function runDriveIncremental({
     result.failures = Object.keys(state.drive_failures).length;
     result.retryable_failures = Object.values(state.drive_failures).filter(failure => failure.retryable === true).length;
     result.recovery_pending = Object.keys(state.drive_restore_pending).length;
+    const failures = Object.entries(state.drive_failures);
+    const operationalGap = failures.some(([uid, failure]) => !isOwnerReviewFailure(state, uid, failure)) ||
+      result.recovery_pending > 0;
+    const hasOwnerDecision = failures.some(([, failure]) => needsIdentityReview(failure)) ||
+      Object.values(state.drive_pending_removals).some(decision => decision?.reason !== "legacy_owner_review");
+    result.review_required = !operationalGap && hasOwnerDecision;
+    // A terminal token can precede completion of the bounded D1 recheck.
+    // Continue from the saved token and proof checkpoint without certifying it.
+    result.more_history = Number.isFinite(deadlineAt) && feedStarted && !operationalGap &&
+      (!result.feed_caught_up || !progressChecked);
     state.drive_incremental_last_run = { ...result, completed_at: timestamp() };
     save();
   }
@@ -398,7 +420,7 @@ export async function driveIncrementalCommand({
   drive, getToken, state, save, sourceName, policy, policyFingerprint,
   scannerOn, scannerFingerprint, ocr, batchStream, splitOversized, sendBatches,
   sanitize, refusalOf, rememberAccepted, rememberFamily, acknowledgeOcr, display, receipt,
-  base, adminKey, statePath, assertOwned, flags, now, limits, write, translateFailure = (error) => error,
+  base, adminKey, statePath, assertOwned, flags, now, deadlineAt, limits, write, translateFailure = (error) => error,
   isOwnerRemoved = async () => false,
   readDriveFamily = readDriveSingleFamily, readCurrentParts = readCurrentIngestParts, request = fetch,
 }) {
@@ -509,7 +531,7 @@ export async function driveIncrementalCommand({
   try {
     await receipt({ source: sourceName, kind: "drive", status: "indexing", lane: "incremental", started_at: startedAt,
       detail: "Drive bounded add/update-only changes check started" });
-    result = await runDriveIncremental({ drive, getToken, state, save, sourceName, policy, processFile, now, isOwnerRemoved,
+    result = await runDriveIncremental({ drive, getToken, state, save, sourceName, policy, processFile, now, deadlineAt, isOwnerRemoved,
       validateProgress:({deadlineAt,maxEntries}) => revalidateIngestProgress({
         state,source:sourceName,proofs:state.drive_accepted_parts,checkpointKey:'drive_progress_recheck',policyFingerprint,
         maxEntries,expired:() => now() >= deadlineAt,
@@ -525,15 +547,22 @@ export async function driveIncrementalCommand({
     // Retain the old global fingerprint until a separately reviewed migration.
     delete state.drive_incremental_error;
     save();
-    await receipt({ source: sourceName, kind: "drive", status: result.complete ? "ready" : "error", lane: "incremental",
+    const ready = result.complete || (result.more_history && !result.review_required);
+    // Accepted files count as work even when the saved checkpoint leaves the
+    // current feed unverified.
+    const checkpointPending = ready && !result.complete;
+    await receipt({ source: sourceName, kind: "drive", status: ready ? "ready" : "error", lane: "incremental",
       started_at: startedAt, completed_at: new Date(now()).toISOString(), walk_complete: result.complete, complete_sweep: false,
       files_seen: result.scanned, docs_added: result.created, docs_updated: result.updated,
       docs_unchanged: result.unchanged,
       docs_refused: Object.values(state.drive_failures || {}).filter(f => f.code === "credential_refused").length,
-      docs_failed: Object.values(state.drive_failures || {}).filter(f => f.code !== "credential_refused").length,
-      provider_check_complete: result.feed_caught_up === true,
+      docs_failed: Object.entries(state.drive_failures || {}).filter(([uid, failure]) =>
+        failure.code !== "credential_refused" && !isOwnerReviewFailure(state, uid, failure)).length,
+      provider_check_complete: !checkpointPending && result.feed_caught_up === true,
+      ...(checkpointPending ? { checkpoint_pending: true } : {}),
       ...(result.complete ? { detail: `Drive is up to date; pending_owner_decisions=${result.pending_removals}; historical_backfill_unproven=1` }
-        : { issue_code: result.pending_removals ? "SAFETY_REVIEW_REQUIRED" : "INGEST_FAILED" }) });
+        : ready ? { detail: "Drive checkpoint saved; the bounded changes check will resume." }
+        : { issue_code: result.review_required ? "SAFETY_REVIEW_REQUIRED" : "INGEST_FAILED" }) });
     write(renderDriveIncrementalStatus(state, display));
     return result;
   } catch (error) {

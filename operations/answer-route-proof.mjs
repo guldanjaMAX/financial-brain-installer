@@ -2,12 +2,21 @@ import { readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { isAbsolute, win32 } from "node:path";
 import { LOCAL_OWNER_AGENT_PROFILE, profileHas } from "../worker/src/lib/agent-authority.js";
+import { COVERAGE_INCOMPLETE } from "../worker/src/lib/retrieval-status.js";
+import { partBRouteTimingShowsFailure } from "../components/brain-mcp-timing.mjs";
 import { mcpRegistrationDescriptor } from "../brain.mjs";
 
 export const PART_B_ROUTE_CONTROL = Object.freeze({
   name: "brain_think",
   arguments: Object.freeze({
     q: "What does the first-install smoke proof establish?",
+  }),
+});
+const MONEY_LINK_CONTROL = Object.freeze({
+  name: "brain_money_query",
+  arguments: Object.freeze({
+    sql: "SELECT 1 AS link_probe FROM fin_accounts LIMIT 1",
+    max_rows: 1,
   }),
 });
 export const CLAUDE_CODE_FULL_EXIT_CARD = Object.freeze({
@@ -242,6 +251,24 @@ function recognizedReceipt(receipt) {
   }
   return receipt.answer_calls > 0 && receipt.check_calls > 0 &&
     receipt.answer_errors === 0 && receipt.check_errors === 0 && receipt.fallback_search_calls === 0;
+}
+
+function singleToolObject(content) {
+  if (content?.length !== 1 || content[0]?.type !== "text") return null;
+  try {
+    const body = JSON.parse(content[0].text);
+    return body && typeof body === "object" && !Array.isArray(body) ? body : null;
+  } catch { return null; }
+}
+
+async function verifyMoneyLink(transport) {
+  try {
+    const reply = await transport.request("tools/call", MONEY_LINK_CONTROL);
+    if (reply?.error || reply?.result?.isError) return false;
+    const body = singleToolObject(reply?.result?.content);
+    return Array.isArray(body?.rows) && !body.error && body.row_count === body.rows.length &&
+      body.rows.length <= 1 && body.rows.every(row => row?.link_probe === 1);
+  } catch { return false; }
 }
 
 /**
@@ -544,7 +571,8 @@ export async function provePartBRouteReadiness({ manifestPath, guideRefresh, con
     return reject("transport_invalid");
   }
 
-  let toolContent = null;
+  let validation;
+  let moneyLinkVerified = false;
   let operationFailure = null;
   try {
     const initialized = await transport.request("initialize", INITIALIZE_PARAMS);
@@ -553,9 +581,32 @@ export async function provePartBRouteReadiness({ manifestPath, guideRefresh, con
     else {
       const freshTool = await transport.request("tools/call", control);
       routeEvents.push("brain_think");
-      if (!freshTool?.result || freshTool.result.isError === true || !Array.isArray(freshTool.result.content)) {
+      if (freshTool?.error || !freshTool?.result || freshTool.result.isError === true || !Array.isArray(freshTool.result.content)) {
         operationFailure = "tool_failed";
-      } else toolContent = freshTool.result.content;
+      } else {
+        const { content, _meta } = freshTool.result;
+        const body = singleToolObject(content);
+        const timing = _meta?.timing;
+        validation = validatePartBRouteReceiptContent(content, {
+          diagnosticsAuthorized: descriptor.env.BRAIN_AGENT_PROFILE === LOCAL_OWNER_AGENT_PROFILE &&
+            profileHas(descriptor.env.BRAIN_AGENT_PROFILE, "diagnostics:read"),
+        });
+        if (body?.answer_error || body?.answer_error_code || timing?.outcome === "error") {
+          operationFailure = "tool_failed";
+        } else if (partBRouteTimingShowsFailure(timing)) {
+          // Observed model errors, a different model or a fallback are
+          // evidence of a failed route even when the MCP omitted its receipt.
+          operationFailure = "receipt_unrecognized";
+        } else if (validation.reason === "receipt_missing" && timing?.outcome === "ok" &&
+            !body?.degraded &&
+            (body?.search_status === COVERAGE_INCOMPLETE ||
+              (!body?.search_status && typeof body?.answer === "string" && body.answer.trim())) &&
+            !(Array.isArray(body.gaps) && body.gaps.some(gap => gap?.type === "anthropic_key_missing"))) {
+          // The MCP clears the displayed answer when coverage is incomplete.
+          // The money endpoint can still respond while the answer proof is pending.
+          moneyLinkVerified = await verifyMoneyLink(transport);
+        }
+      }
     }
   } catch { operationFailure = "transport_request_failed"; }
   try {
@@ -564,11 +615,7 @@ export async function provePartBRouteReadiness({ manifestPath, guideRefresh, con
   } catch { return reject("transport_close_failed"); }
   if (operationFailure) return reject(operationFailure);
 
-  const validation = validatePartBRouteReceiptContent(toolContent, {
-    diagnosticsAuthorized: descriptor.env.BRAIN_AGENT_PROFILE === LOCAL_OWNER_AGENT_PROFILE &&
-      profileHas(descriptor.env.BRAIN_AGENT_PROFILE, "diagnostics:read"),
-  });
-  if (!validation.accepted) return reject(validation.reason);
+  if (!validation.accepted) return reject(validation.reason, moneyLinkVerified ? { money_link_verified: true } : {});
   return Object.freeze({
     ready: true,
     reason: "route_receipt_accepted",
