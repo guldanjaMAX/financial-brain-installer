@@ -727,6 +727,8 @@ const expected = [
   "operations/ledger-account-kind.mjs",
   "operations/content-refresh-dates.mjs",
   "operations/cloudflare-token-store.mjs",
+  // Pure public-pricing guide; no billing, credential or external capability.
+  "operations/cloudflare-subscriptions.mjs",
   // Generic brain check modules. Reviewed 2026-09-05: categories and fixtures
   // are synthetic, with no client identity or credential material.
   "operations/provenance.mjs",
@@ -888,6 +890,8 @@ const expected = [
   // Saves the Brain address next to the install record (atomic write, mode 0600);
   // reads no credential and calls no network. Listed at 0.4.30 integration.
   "operations/brain-domain-save.mjs",
+  // Pure exact-binding proof shared by both existing-Worker setup branches.
+  "operations/setup-settings-proof.mjs",
   // Owner text for a failed Gmail refresh: fixed product copy only, never the
   // exception text; no filesystem, credential or network calls.
   // Listed at 0.4.30 integration.

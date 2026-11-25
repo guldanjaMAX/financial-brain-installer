@@ -1288,6 +1288,111 @@ test("IMAP passes only non-secret routing values and leaves app-password prompti
   assert.doesNotMatch(JSON.stringify(call), /ambient-secret/);
 });
 
+// No invitation bytes are produced by these injected children. The real child
+// keeps inherited stdio so its private link is never captured by the guide.
+test("R1 passkey invitation success remains pending without device proof", async () => {
+  let inviteCalls = 0;
+  const receipt = await runTechnicianStep({
+    step: "passkey", manifestPath, scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath, flags: { "confirm-host": "brain.fixture.test" },
+    spawn: (_node, args, options) => {
+      assert.equal(args[1], "invite");
+      assert.equal(options.stdio, "inherit");
+      inviteCalls++;
+      return { status: 0 };
+    },
+  });
+  assert.equal(inviteCalls, 1, "R1 reached the successful invite child");
+  let toolsCalls = 0;
+  const control = await runTechnicianStep({
+    step: "tools", manifestPath, scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath, spawn: () => { toolsCalls++; return { status: 0 }; },
+  });
+  assert.equal(toolsCalls, 1);
+  assert.equal(control.completed, true, "R1 unrelated successful steps still complete");
+  assert.equal(receipt.completed, false, "R1 an invite exit is not enrollment proof");
+  assert.equal(receipt.invitation_prepared, true);
+  assert.equal(receipt.enrollment_proven, false);
+  assert.equal(receipt.commands_run, 1);
+  assert.equal(receipt.state, "enrollment_pending");
+  assert.match(receipt.next_action, /open.*one-time link.*Create my owner passkey/i);
+  assert.match(receipt.next_action, /final Brain address/);
+});
+
+test("R2 pending passkey receipt bypasses the generic done renderer", async () => {
+  const lines = [];
+  const originalLog = console.log;
+  let inviteCalls = 0;
+  let toolsCalls = 0;
+  let receipt;
+  try {
+    // Only safe guide output is captured. The stub never mints or prints a link.
+    console.log = (line) => lines.push(String(line));
+    const options = {
+      scriptPath: fixtureScriptPath, nodePath: fixtureNodePath,
+      writeBriefing: (line) => lines.push(line),
+      spawn: (_node, args, childOptions) => {
+        assert.equal(childOptions.stdio, "inherit");
+        if (args[1] === "invite") inviteCalls++;
+        else { assert.equal(args[1], "tools"); toolsCalls++; }
+        return { status: 0 };
+      },
+    };
+    receipt = await cmdTechnician(manifestPath, {
+      run: "passkey", "confirm-host": "brain.fixture.test",
+    }, options);
+    assert.equal(inviteCalls, 1, "R2 reached the successful invite child");
+    const pendingOutput = lines.join("\n");
+    lines.length = 0;
+    await cmdTechnician(manifestPath, { run: "tools" }, options);
+    assert.equal(toolsCalls, 1, "R2 reached the unrelated tools control");
+    assert.match(lines.join("\n"), /✅ STEP 1 of 6 done: Check this computer/);
+    assert.doesNotMatch(pendingOutput, /✅|done:/, "R2 pending enrollment has no done line");
+    assert.equal(receipt.completed, false);
+    assert.match(pendingOutput, /invitation prepared.*enrollment.*pending/i);
+    assert.match(pendingOutput, /Create my owner passkey/);
+  } finally { console.log = originalLog; }
+});
+
+test("R3 no device read adapter means no claimed enrollment from child metadata", async () => {
+  // Even plausible metadata from an invite is not an authenticated devices
+  // readback. This slice deliberately has no production read adapter.
+  const unproven = [
+    { hostname: "other.fixture.test", devices: [{ credential_id: "fixture-device" }] },
+    { hostname: "brain.fixture.test" },
+    { hostname: "brain.fixture.test", devices: [] },
+    { hostname: "brain.fixture.test", devices: "malformed" },
+    { hostname: "brain.fixture.test", http_status: 403 },
+    { hostname: "brain.fixture.test", devices: [{ credential_id: "fixture-device" }] },
+  ];
+  let inviteCalls = 0;
+  const receipts = [];
+  for (const metadata of unproven) {
+    const receipt = await runTechnicianStep({
+      step: "passkey", manifestPath, scriptPath: fixtureScriptPath,
+      nodePath: fixtureNodePath, flags: { "confirm-host": "brain.fixture.test" },
+      spawn: (_node, args) => {
+        assert.equal(args[1], "invite");
+        inviteCalls++;
+        return { ...metadata, status: 0 };
+      },
+    });
+    assert.equal(inviteCalls, unproven.indexOf(metadata) + 1, "R3 reached each invite arm");
+    receipts.push(receipt);
+  }
+  await assert.rejects(runTechnicianStep({
+    step: "passkey", manifestPath, scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath, flags: { "confirm-host": "brain.fixture.test" },
+    spawn: () => { inviteCalls++; return { status: 1 }; },
+  }), /paused before completion/);
+  assert.equal(inviteCalls, unproven.length + 1, "R3 failed invite control was reached");
+  for (const receipt of receipts) {
+    assert.equal(receipt.completed, false, "R3 unproven device metadata cannot complete enrollment");
+    assert.equal(receipt.enrollment_proven, false);
+    assert.match(receipt.next_action, /check.*enrolled device/i);
+  }
+});
+
 test("passkey enrollment refuses before mutation unless the exact final hostname is confirmed", async () => {
   let calls = 0;
   const common = {

@@ -26,6 +26,10 @@ import {
   cmdDeploy,
   cmdProvision,
   cmdSetup,
+  buildSetupManifest,
+  probeExistingWorkerHealth,
+  probeExistingWorkerDrainMode,
+  workerBindings,
   commandPath,
   displayPathForTesting,
   persistWorkersDevDomain,
@@ -723,6 +727,118 @@ async function captureOutput(run) {
   return lines.map((line) => line.replace(/\u001b\[[0-9;]*m/g, ""));
 }
 
+// Exercise setup's real final deploy and optional-save boundary, with every
+// external effect injected. The clock charges each probe against the budget.
+async function runSetupAddressScenario(answers) {
+  const target = writeManifest();
+  const original = readFileSync(target, "utf8");
+  const keyFile = join(sandbox, `key-${manifestCounter++}`);
+  writeFileSync(keyFile, ["fixture", "admin"].join("-"), { mode: 0o600 });
+  const h = harness({ subdomainRead: "ok", health: "healthy" });
+  const calls = { verify: 0, provision: 0, migrate: 0, deploy: 0, domain: 0,
+    probes: 0, secrets: 0, drain: 0, health: 0, remember: 0, backlog: 0 };
+  const waits = [], timeouts = [];
+  let clock = 0, value, error;
+  const lines = await captureOutput(async () => {
+    try {
+      value = await withFixture(h.fetchImpl, () => cmdSetup(target, {
+        flags: { "no-connect": true }, preflightChecks: [], ask: async () => "",
+        configureStandardAdminKeyStorage: () => ({ changed: false }),
+        prepareSetupAdminKey: async () => ({ source: "durable", value: readFileSync(keyFile, "utf8") }),
+        cmdVerify: async () => { calls.verify++; },
+        cmdProvision: async () => { calls.provision++; },
+        cmdMigrate: async () => { calls.migrate++; },
+        cmdDeploy: async (path, options) => { calls.deploy++; return cmdDeploy(path, options); },
+        setupWorkerScriptExists: async () => false,
+        cmdSecrets: async () => { calls.secrets++; },
+        cmdDrain: async () => { calls.drain++; },
+        cmdHealth: async () => { calls.health++; },
+        rememberInstalledManifest: () => { calls.remember++; },
+        backlogCount: async () => { calls.backlog++; return 0; },
+        domainSaveOptions: {
+          readSubdomain: async () => { calls.domain++; return { subdomain: SUBDOMAIN_LABEL }; },
+          request: async (url, init, { timeoutMs }) => {
+            assert.equal(url, `https://${CANDIDATE_DOMAIN}/health`);
+            assert.equal(init.headers?.Authorization, undefined);
+            assert.ok(timeoutMs > 0 && timeoutMs <= 60_000 - clock);
+            timeouts.push(timeoutMs);
+            clock += Math.min(1_000, timeoutMs);
+            const answer = answers[Math.min(calls.probes++, answers.length - 1)];
+            if (answer === "healthy") return healthResponse({ brain: SLUG, version: VERSION });
+            if (answer === "foreign") return healthResponse({ brain: "foreign-fixture", version: VERSION });
+            return healthResponse({ detail: `RAW_PROVIDER_SENTINEL ${ACCOUNT_ID}` }, { status: answer });
+          },
+          now: () => clock,
+          wait: async ms => { waits.push(ms); clock += ms; },
+        },
+      }), { workersSubdomain: null });
+    } catch (caught) { error = caught; }
+  });
+  // Reached assertions precede every negative assertion, including the red run.
+  assert.equal(calls.deploy, 1, "setup reached its real final deploy");
+  assert.ok(h.calls.some(call => call.startsWith("PUT ") && call.endsWith(`/workers/scripts/${SCRIPT_NAME}`)),
+    "the real Worker upload decision was reached");
+  assert.equal(calls.domain, 1, "the optional-save subdomain decision was reached");
+  assert.ok(calls.probes > 0, "the real candidate identity decision was reached");
+  return { target, original, calls, clock, waits, timeouts, value, error, lines, text: lines.join("\n") };
+}
+
+test("R1: exhausted guided setup returns pending before keys, drain, health or a running claim", async t => {
+  const run = await runSetupAddressScenario([404]);
+  t.diagnostic(JSON.stringify({ calls: run.calls, clock: run.clock, result: run.value ?? null,
+    runningClaim: /STEP 3 of 6 done/.test(run.text), completeClaim: /Brain setup complete/.test(run.text) }));
+  assert.equal(run.clock, 60_000, "exhaustion uses exactly the existing one-minute budget");
+  assert.equal(run.error, undefined, "propagation is a supported resumable result");
+  assert.equal(run.value?.code, "BRAIN_ADDRESS_PENDING", "setup must preserve the typed propagation result");
+  assert.equal(run.value?.status, "pending");
+  assert.equal(run.calls.secrets, 0, "pending stops before secret writes");
+  assert.equal(run.calls.drain, 0); assert.equal(run.calls.health, 0);
+  assert.equal(run.calls.remember, 0); assert.equal(run.calls.backlog, 0);
+  assert.doesNotMatch(run.text, /STEP 3 of 6 done|STEP 4 of 6|Your Brain is running|Brain setup complete/);
+  assert.equal(readFileSync(run.target, "utf8"), run.original, "resource IDs and all manifest bytes are kept");
+});
+
+test("R1 green control: delayed identity inside the budget completes real setup", async () => {
+  const run = await runSetupAddressScenario([404, 404, "healthy"]);
+  assert.equal(run.error, undefined);
+  assert.equal(run.calls.probes, 3); assert.equal(run.waits.length, 2); assert.equal(run.clock, 13_000);
+  assert.equal(run.calls.secrets, 1); assert.equal(run.calls.drain, 1); assert.equal(run.calls.health, 1);
+  assert.equal(run.calls.remember, 1); assert.equal(run.calls.backlog, 1);
+  assert.equal(JSON.parse(readFileSync(run.target, "utf8")).brain.domain, CANDIDATE_DOMAIN);
+  assert.match(run.text, /STEP 3 of 6 done: your Brain is running/);
+  assert.match(run.text, /Brain setup complete/);
+  assert.doesNotMatch(run.text, /BRAIN_ADDRESS_PENDING/);
+});
+
+test("R2: pending copy keeps work and renders exactly one same-setup resume action", async () => {
+  const run = await runSetupAddressScenario([404]);
+  assert.equal(run.value?.code, "BRAIN_ADDRESS_PENDING", "a generic failure is not the pending contract");
+  const pending = run.lines.filter(line => line.includes("BRAIN_ADDRESS_PENDING"));
+  assert.equal(pending.length, 1, "only one supported pending line is emitted");
+  assert.match(pending[0], /address is still coming online/i);
+  assert.match(pending[0], /everything done so far is kept/i);
+  const resume = renderCliCommands(`brain setup ${commandPath(displayPathForTesting(run.target, process.cwd()))} --no-connect`);
+  assert.ok(pending[0].includes(resume), "pending prints the exact rendered setup command");
+  assert.match(pending[0], /in a few minutes/);
+  assert.doesNotMatch(run.text, /RAW_PROVIDER_SENTINEL|BRAIN_DOMAIN_NOT_SAVED|\/health returned|after 6 attempts/);
+  assert.ok(!run.text.includes(ACCOUNT_ID), "provider account identity never reaches pending copy");
+  assert.ok(!run.text.includes(renderCliCommands("brain deploy")), "pending offers setup only");
+});
+
+test("R3: a foreign identity stops guided setup immediately and is never pending", async t => {
+  const run = await runSetupAddressScenario(["foreign", "healthy"]);
+  t.diagnostic(JSON.stringify({ calls: run.calls, waits: run.waits.length, hardMismatch: Boolean(run.error) }));
+  assert.equal(run.calls.probes, 1); assert.deepEqual(run.waits, []);
+  assert.ok(run.error, "a different Brain is a hard mismatch through the optional boundary");
+  assert.match(run.error.message, /identified itself as "foreign-fixture"/);
+  assert.doesNotMatch(run.error.message, /propagat|still coming online/i,
+    "a hard mismatch must not be described as propagation");
+  assert.equal(run.value, undefined);
+  assert.equal(run.calls.secrets, 0); assert.equal(run.calls.drain, 0); assert.equal(run.calls.health, 0);
+  assert.doesNotMatch(run.text, /BRAIN_ADDRESS_PENDING|STEP 3 of 6 done|Brain setup complete/);
+  assert.equal(readFileSync(run.target, "utf8"), run.original);
+});
+
 // The identity gate can sit for about a minute after "workers.dev route
 // enabled". A silent minute reads as a hang, so each retry says what it is
 // waiting for in the same words the drain warm-up already uses.
@@ -774,4 +890,136 @@ test("hanging identity probes stay inside the propagation budget instead of mult
   assert.ok(clock >= MIN_PROPAGATION_BUDGET_MS, `the gate gave up after ${clock} ms, before the propagation budget`);
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.brain?.domain, undefined);
+});
+
+// Exercise setup itself: the two branches share one settings read before any
+// deployment, migration, or remote secret reconciliation. All bytes are synthetic.
+async function runSettingsProofScenario(branch, arm) {
+  const target = join(sandbox, `settings-${manifestCounter++}.json`);
+  const m = buildSetupManifest({ display: "Owner", slug: "owner", accountId: ACCOUNT_ID });
+  m.brain.domain = "owner-brain.fixture.invalid";
+  m.infrastructure.cloudflare.d1_database_id = "fixture-settings-db";
+  m.infrastructure.cloudflare.vectorize_index = "owner-brain";
+  if (arm === "unpinned-db") delete m.infrastructure.cloudflare.d1_database_id;
+  if (arm === "reserved-optional") delete m.client.timezone;
+  if (arm === "retained-disabled") m.corpora.custom_api = { enabled: false };
+  if (arm.startsWith("active-")) m.corpora.custom_api = {
+    enabled: true, source: "fixture", token_secret: "CUSTOM_API_TOKEN_FIXTURE",
+    base_url: "https://fixture.invalid/api/", endpoints: [{ name: "records", path: "/records", row_key: ["id"],
+      document: { fields: ["id", "body"], title_template: "Record {{id}}", body_template: "{{body}}" } }],
+  };
+  const keyPath = join(sandbox, "settings-admin-key");
+  writeFileSync(keyPath, Buffer.alloc(48, 107), { mode: 0o600 });
+  const checkpoint = JSON.stringify(m, null, 2) + "\n";
+  writeFileSync(target, checkpoint);
+  const calls = [];
+  const version = arm === "other-live-version" ? "0.0.1" : branch === "retry" ? VERSION : "0.1.14";
+  const bindings = workerBindings(m, m.infrastructure.cloudflare).map(row => ({ ...row }));
+  bindings.find(row => row.name === "BRAIN_VERSION").text = version;
+  const customName = "CUSTOM_API_TOKEN_FIXTURE";
+  bindings.push({ name: "ADMIN_KEY", type: "secret_text" }, { name: "ANTHROPIC_API_KEY", type: "secret_text" });
+  if (arm === "reserved-optional") bindings.push({ name: "BRAIN_TIMEZONE", type: "secret_text" });
+  if (["retained-disabled", "retained-removed", "retained-wrong-type"].includes(arm)) {
+    bindings.push({ name: customName, type: arm === "retained-wrong-type" ? "plain_text" : "secret_text" });
+  }
+  if (["active-exact", "active-missing-config"].includes(arm)) bindings.push({ name: customName, type: "secret_text" });
+  if (arm === "active-missing-config") bindings.splice(bindings.findIndex(row => row.name === "CUSTOM_API_CONFIG"), 1);
+  if (arm === "unpinned-db") bindings.find(row => row.name === "DB").id = "other-db";
+  if (arm === "wrong-db") bindings.find(row => row.name === "DB").id = "other-db";
+  if (arm === "wrong-version") bindings.find(row => row.name === "BRAIN_VERSION").text = "0.1.13";
+  if (arm === "fence") bindings.push({ name: "VECTOR_ROLLBACK_FENCE", type: "plain_text", text: "1" });
+  if (arm === "reserved-secret") bindings.find(row => row.name === "DB").type = "secret_text";
+  if (arm === "missing-db") bindings.splice(bindings.findIndex(row => row.name === "DB"), 1);
+  if (arm === "missing-version") bindings.splice(bindings.findIndex(row => row.name === "BRAIN_VERSION"), 1);
+  if (arm === "duplicate-db") bindings.push({ ...bindings.find(row => row.name === "DB") });
+  if (arm === "unknown-runtime") bindings.push({ name: "UNREVIEWED_RUNTIME", type: "plain_text", text: "1" });
+  if (arm === "custom-only") bindings.splice(0, bindings.length, { name: customName, type: "secret_text" });
+  const healthBody = { ok: true, brain: "owner", version, accepting_documents: true,
+    vector_writer_protocol: branch === "retry" ? "lease-v1" : "legacy",
+    vector_drain_mode: "active", rollback_write_fence: false };
+  const http = async (url) => {
+    assert.equal(url, `https://${m.brain.domain}/health`, "only the exact pinned route is probed");
+    calls.push("health-read"); return healthResponse(healthBody);
+  };
+  let error = null;
+  const priorLog = console.log;
+  try {
+    console.log = () => {};
+    await cmdSetup(target, {
+      flags: { "no-connect": true }, preflightChecks: [], ask: async () => "",
+      configureStandardAdminKeyStorage: () => ({ changed: false }),
+      prepareSetupAdminKey: async () => ({ source: "durable", value: readFileSync(keyPath, "utf8") }),
+      cmdVerify: async () => { calls.push("verify"); },
+      cmdProvision: async () => { calls.push("provision"); },
+      setupWorkerScriptExists: async () => { calls.push("inventory"); return true; },
+      probeExistingWorkerHealth: (path, options) => probeExistingWorkerHealth(path, { ...options, http }),
+      probeExistingWorkerDrainMode: (path, options) => probeExistingWorkerDrainMode(path, { ...options, http }),
+      setupSettingsProofOptions: {
+        http,
+        resolveAccount: async () => ({ id: ACCOUNT_ID }),
+        cf: async (path) => {
+          assert.equal(path, `/accounts/${ACCOUNT_ID}/workers/scripts/owner-brain/settings`);
+          calls.push("settings-read");
+          if (arm === "other-live-version") throw new Error("fixture settings unavailable");
+          return { bindings };
+        },
+      },
+      captureSetupD1Bookmark: async () => { calls.push("bookmark"); return "fixture-bookmark"; },
+      waitForVectorDrainQuiescence: async () => { calls.push("wait"); },
+      cmdMigrate: async () => { calls.push("migrate"); },
+      cmdDeploy: async () => { calls.push("upload"); },
+      cmdSecrets: async () => { calls.push("secrets"); },
+      cmdDrain: async () => { calls.push("drain"); },
+      cmdHealth: async () => { calls.push("health"); },
+      rememberInstalledManifest: () => {}, backlogCount: async () => 0, connectAgents: false,
+    });
+  } catch (caught) { error = caught; }
+  finally { console.log = priorLog; }
+  return { calls, error, checkpointUnchanged: readFileSync(target, "utf8") === checkpoint };
+}
+
+for (const branch of ["retry", "legacy"]) {
+  for (const arm of ["exact", "retained-disabled", "retained-removed", "active-exact", "active-missing-token", "active-missing-config", "wrong-db", "wrong-version",
+    "fence", "retained-wrong-type", "reserved-secret", "missing-db", "missing-version", "duplicate-db", "unknown-runtime", "unpinned-db", "custom-only", "reserved-optional"]) {
+    test(`shared settings proof ${branch}: ${arm}`, async (t) => {
+      const run = await runSettingsProofScenario(branch, arm);
+      const permits = ["exact", "retained-disabled", "retained-removed", "active-exact"].includes(arm);
+      t.diagnostic(JSON.stringify({ branch, arm, settingsRead: run.calls.filter(call => call === "settings-read").length,
+        downstreamUpload: run.calls.filter(call => call === "upload").length,
+        migrate: run.calls.filter(call => call === "migrate").length,
+        secrets: run.calls.filter(call => call === "secrets").length, checkpointUnchanged: run.checkpointUnchanged,
+        held: Boolean(run.error) }));
+      assert.ok(run.calls.includes("inventory") && run.calls.includes("health-read"), "real setup identity decision reached");
+      if (permits) {
+        assert.equal(run.error, null, run.error?.message);
+        assert.equal(run.calls.filter(call => call === "secrets").length, 1, "green control reaches key reconciliation");
+        assert.ok(run.calls.indexOf("settings-read") < run.calls.indexOf("secrets"), "proof precedes key reconciliation");
+        assert.equal(run.calls.filter(call => call === "upload").length, branch === "legacy" ? 2 : 0);
+        assert.equal(run.calls.filter(call => call === "migrate").length, branch === "legacy" ? 1 : 0);
+      } else {
+        assert.ok(run.error, `${arm}: contradictory settings must stop setup before downstream work`);
+        assert.match(run.error.message, /settings proof/i);
+        assert.deepEqual(run.calls.filter(call => ["upload", "migrate", "secrets", "bookmark"].includes(call)), [], "downstreamUpload/migrate/secrets=0");
+      }
+      assert.equal(run.calls.filter(call => call === "settings-read").length, 1, "settingsRead=1 proves the shared decision was reached");
+      assert.equal(run.checkpointUnchanged, true, "checkpoint bytes preserved");
+    });
+  }
+}
+
+test("both existing-Worker branches wire the same pinned settings proof", () => {
+  const source = readFileSync(join(ROOT, "brain.mjs"), "utf8");
+  const setup = source.slice(source.indexOf("export async function cmdSetup("), source.indexOf("// Even resumed setup reaches this boundary"));
+  assert.equal((setup.match(/await runPinnedSetupStage\("setup existing Worker settings proof", proveExistingSettings\)/g) || []).length, 2);
+  assert.equal((setup.match(/const proveExistingSettings = \(pinnedPath\) => proveSetupWorkerSettings/g) || []).length, 1);
+});
+
+test("an already-live other release keeps its update guidance before settings reads", async () => {
+  const run = await runSettingsProofScenario("retry", "other-live-version");
+  assert.ok(run.calls.includes("inventory") && run.calls.includes("health-read"), "version hold decision reached");
+  assert.match(run.error?.message || "", /already installed and live on version 0\.0\.1/);
+  assert.ok(renderCliCommands(run.error.message).includes(renderCliCommands("brain update")));
+  assert.equal(run.calls.filter(call => call === "settings-read").length, 0, "the existing version hold is sufficient before any continuation");
+  assert.deepEqual(run.calls.filter(call => ["upload", "migrate", "secrets", "bookmark"].includes(call)), []);
+  assert.equal(run.checkpointUnchanged, true);
 });

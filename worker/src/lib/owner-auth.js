@@ -49,6 +49,18 @@ import { readUpdateStatus } from "./update-status.js";
 
 const APP_HEADER = "X-Brain-App";
 
+function supportContactUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && !url.username && !url.password) return url.href;
+    if (url.protocol === "mailto:" && url.pathname) return url.href;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function appRequest(request) {
   return request.headers.get(APP_HEADER) === "1";
 }
@@ -812,11 +824,15 @@ export async function handleOwnerAuth(env, request, url, path, options = {}) {
         ),
       });
     }
+    const { bankFeedEnabled } = await import("./bank-feed.js");
+    const contactUrl = supportContactUrl(env.BRAIN_SUPPORT_CONTACT_URL);
     return jsonResponse({
       signed_in: true,
       brain: env.BRAIN_NAME || "brain",
       owner: env.BRAIN_OWNER || "owner",
       principal: { kind: "owner", grant_id: null },
+      bank_configured: bankFeedEnabled(env),
+      ...(contactUrl ? { support: { contact_url: contactUrl } } : {}),
       devices: await listPasskeys(env),
       // Apps reaching the brain over the connector, so one call answers the
       // whole of "who has access" rather than two that can disagree.

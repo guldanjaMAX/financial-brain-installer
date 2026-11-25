@@ -6,6 +6,12 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.34 (2026-11-22)
 
+- **Cloudflare setup explains which services your Brain needs.** Choose Workers
+  Paid for setup without adding Images or Stream. The checkup can explain names
+  you read from Billing > Subscriptions with dated official pricing sources.
+  It does not verify your bill or change a subscription. Check other projects
+  and product terms with your installer before cancelling anything.
+
 - **Bank balances need a fresh check.** Your Brain shows a balance as current
   only after verifying it. If a bank read fails or its confirmation
   cannot be used, your Brain reads again or tells you the balance is still

@@ -1365,6 +1365,22 @@ export async function runTechnicianStep({
     childEnv = technicianChildEnvironment(baseEnv, explicitEnv);
     const commands = childCommands(step, manifestPath, flags, resolve(scriptPath), routing);
     for (const args of commands) runOne(spawn, nodePath, args, childEnv);
+    if (step === "passkey") {
+      // The invite child's success proves only that a link was prepared. There
+      // is no authenticated enrolled-device readback in this path, so neither
+      // its exit status nor its output can prove enrollment or owner sign-in.
+      return {
+        step,
+        completed: false,
+        commands_run: commands.length,
+        invitation_prepared: true,
+        enrollment_proven: false,
+        state: "enrollment_pending",
+        next_action: "In your own terminal, open the one-time link, choose Create my owner passkey, " +
+          "and finish your device's secure prompt. Then check your enrolled device with " +
+          "your installer on your final Brain address. Owner-app sign-in still needs its own check.",
+      };
+    }
     if (step === "smoke") {
       if (typeof runInstallSmoke !== "function") {
         throw codedError(

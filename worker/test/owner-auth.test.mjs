@@ -13,6 +13,7 @@ import {
   consumeChallenge, consumeEnrollmentCode, recordPasskeyUse, revokePasskey, sha256Hex,
 } from "../src/lib/auth-store.js";
 import { handleOwnerAuth } from "../src/lib/owner-auth.js";
+import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "../src/lib/bank-feed.js";
 import { makeCredential, signAssertion, clientData, attestationObject } from "./webauthn-fixtures.mjs";
 
 const ORIGIN = "https://brain.example.com";
@@ -227,6 +228,44 @@ test("invite -> enroll -> sign in -> settings, end to end", async () => {
   // backup owner credential, so the last unrestricted owner cannot be revoked.
   const me = await (await worker.fetch(post("/api/app/me", {}, { Cookie: cookie, "X-Brain-App": "1" }), testEnv)).json();
   assert.equal(me.devices.length, 1);
+  assert.deepEqual(me.principal, { kind: "owner", grant_id: null });
+  assert.equal(me.bank_configured, false);
+  assert.equal(me.support, undefined);
+  const readMeWithContact = async (contact, bank = {}) => {
+    const response = await worker.fetch(
+      post("/api/app/me", {}, { Cookie: cookie, "X-Brain-App": "1" }),
+      { ...testEnv, ...bank, BRAIN_SUPPORT_CONTACT_URL: contact },
+    );
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result.principal, { kind: "owner", grant_id: null },
+      "contact and bank arms must reach the authenticated owner response");
+    return result;
+  };
+  assert.deepEqual((await readMeWithContact("https://support.invalid/contact")).support, {
+    contact_url: "https://support.invalid/contact",
+  });
+  for (const contact of [undefined, "", "not a URL", "http://support.invalid/contact",
+    "javascript:void(0)", "data:text/plain,fixture", "mailto:",
+    `https://${["fixture-user", "fixture-value"].join(":")}@support.invalid/contact`]) {
+    assert.equal((await readMeWithContact(contact)).support, undefined);
+  }
+  for (const contact of ["mailto:help@support.invalid", "https://support.invalid/contact?topic=help#next"]) {
+    assert.deepEqual((await readMeWithContact(contact)).support, { contact_url: contact });
+  }
+  const wrappingKey = Array.from({ length: 32 }, (_, index) => index + 1);
+  const validKey = ["v2", Buffer.from(wrappingKey).toString("base64url")].join(".");
+  const bankArms = [
+    [{ BANK_FEED_PROVIDER: "custom" }, false],
+    [{ BANK_FEED_PROVIDER: "simplefin", [BANK_ACCESS_WRAPPING_KEY_SECRET]: "invalid" }, false],
+    [{ BANK_FEED_PROVIDER: "simplefin", [BANK_ACCESS_WRAPPING_KEY_SECRET]: validKey }, true],
+    [{ BANK_FEED_PROVIDER: "custom", BANK_FEED_CLIENT_ID: "fixture-client",
+      BANK_FEED_SECRET: ["fixture", "bank"].join("-"), BANK_FEED_API_BASE: "https://bank-provider.invalid",
+      [BANK_ACCESS_WRAPPING_KEY_SECRET]: validKey }, true],
+  ];
+  for (const [bank, expected] of bankArms) {
+    assert.equal((await readMeWithContact(undefined, bank)).bank_configured, expected);
+  }
   assert.equal(me.devices[0].nickname, "Morgan's phone");
 
   const updateRequest = post("/api/app/update-status", {}, { Cookie: cookie, "X-Brain-App": "1" });

@@ -332,8 +332,13 @@ test("revocation immediately closes reads and scoped sessions cannot reach owner
     grantId: grant.grant_id, credentialId: "scoped-device",
   })).split(";")[0];
 
-  const me = await worker.fetch(post("/api/app/me", {}, scopedCookie), env, {});
+  const me = await worker.fetch(post("/api/app/me", {}, scopedCookie), {
+    ...env, BRAIN_SUPPORT_CONTACT_URL: "https://support.invalid/contact",
+  }, {});
+  assert.equal(me.status, 200);
   const meBody = await me.json();
+  assert.equal(meBody.support, undefined);
+  assert.equal(meBody.bank_configured, undefined);
   assert.deepEqual(meBody.principal, {
     kind: "grant",
     grant_id: grant.grant_id,

@@ -1460,7 +1460,9 @@ export async function runAll({
       push(checkWranglerLogin(accountId, localRun, { authProfile: cloudflareAuthProfile }));
     } else {
       push(await checkCfToken(cloudflareToken, { accountId }));
-      push(await checkWorkersPaidPlan(accountId, cloudflareToken));
+      // The install scopes do not include billing. Owner-supplied dashboard
+      // labels explain products without widening recovery-token access.
+      push(await checkWorkersPaidPlan(accountId, null));
       const vectorize = cloudflareToken ? await checkVectorizeApi(accountId, cloudflareToken) : null;
       if (vectorize) push(vectorize);
       if (accountId && (!vectorize || vectorize.status !== OK)) {

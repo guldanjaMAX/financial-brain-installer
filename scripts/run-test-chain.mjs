@@ -12,6 +12,10 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // 172-command chain and order. Add to this list when you add a test; never
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
+  "node --test test/owner-menu-basics-0434.test.mjs",
+  "node --test test/practice-export-version-0434.test.mjs",
+  "node --test test/practice-time-contract-0434.test.mjs",
+  "node --test test/practice-stop-authorization-0434.test.mjs",
   "node --test test/windows-current-launchers.test.mjs",
   "node --test test/owner-checklist.test.mjs",
   "node --test test/brain-domain-save.test.mjs",
@@ -321,6 +325,10 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/daily-refresh-selection.test.mjs",
   "node --test test/oauth-lock-recovery.test.mjs",
   "node --test test/doctor-cli-isolation.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434-mutants.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434-privacy.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434-portability.test.mjs",
   "node --test worker/test/books-match-graph.test.mjs",
   "node --test worker/test/books-match.test.mjs",
   "node --test test/financial-contract.test.mjs",
@@ -614,6 +622,10 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
+  "node --test test/owner-menu-basics-0434.test.mjs",
+  "node --test test/practice-export-version-0434.test.mjs",
+  "node --test test/practice-time-contract-0434.test.mjs",
+  "node --test test/practice-stop-authorization-0434.test.mjs",
   "node --test test/windows-current-launchers.test.mjs",
   "node --test test/owner-checklist.test.mjs",
   "node --test test/brain-domain-save.test.mjs",
@@ -941,6 +953,10 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/cli-success-exit.test.mjs",
   "node test/errors.test.mjs",
   "node --test test/doctor-cli-isolation.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434-mutants.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434-privacy.test.mjs",
+  "node --test test/cf-subscriptions-guide-0434-portability.test.mjs",
   "node test/doctor.test.mjs",
   "node --test test/drain-cron-default.test.mjs",
   "node --no-warnings test/bank-feed-secrets.test.mjs",

@@ -81,6 +81,8 @@ const liveHealth = (drainMode) => async () =>
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "setup-paused-guard-")));
 try {
   const manifestPath = join(sandbox, "brain.manifest.json");
+  const adminKeyPath = join(sandbox, "fixture-admin-key");
+  writeFileSync(adminKeyPath, Buffer.alloc(48, 107), { mode: 0o600 });
   writeFileSync(manifestPath, JSON.stringify(installedManifest(), null, 2) + "\n");
   const installedManifestOptions = { home: sandbox, stateDirectory: join(sandbox, "installed-state") };
 
@@ -220,12 +222,23 @@ try {
    * 2. setup REFUSES a paused brain, driven through the REAL probes
    * --------------------------------------------------------------------- */
 
+  let settingsReads = 0;
   const setupOptions = (overrides, touched) => ({
     flags: {},
     ask: async (_question, fallback) => fallback || "",
     doctorRunAll: async () => [],
     configureStandardAdminKeyStorage: () => ({ changed: false }),
-    prepareSetupAdminKey: async () => ({ source: "durable", value: "k".repeat(48), plan: { backend: "file" } }),
+    prepareSetupAdminKey: async () => ({ source: "durable", value: readFileSync(adminKeyPath, "utf8"), plan: { backend: "file" } }),
+    setupSettingsProofOptions: {
+      resolveAccount: async () => ({ id: ACCOUNT_ID }),
+      cf: async (path) => {
+        if (path !== `/accounts/${ACCOUNT_ID}/workers/scripts/riverbend-brain/settings`) throw new Error("unexpected fixture path");
+        settingsReads++;
+        const m = installedManifest();
+        return { bindings: brain.workerBindings(m, m.infrastructure.cloudflare) };
+      },
+      http: liveHealth("active"),
+    },
     setupWorkerScriptExists: async () => true,
     captureSetupD1Bookmark: async () => { touched.push("bookmark"); return "never"; },
     waitForVectorDrainQuiescence: async () => { touched.push("wait"); },
@@ -401,6 +414,8 @@ try {
     String(activeError?.message || JSON.stringify(activeTouched)));
   check("and the pause probe is not even asked once the brain answers as finished",
     drainModeConsulted === false, String(drainModeConsulted));
+  check("both exact active controls reach the real shared settings proof once",
+    settingsReads === 2, String(settingsReads));
 
   /* ------------------------------------------------------------------------
    * 5. the AUTH_REQUIRED copy points at update, and at explicit consent

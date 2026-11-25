@@ -20,6 +20,28 @@ function workspace(t, raw = JSON.stringify(fixture(), null, 2) + "\n") {
   return { dir, path, raw };
 }
 
+for (const guidedSetup of [false, true]) {
+  test(`R3 optional-save contract: propagation is typed only for guided setup (${guidedSetup})`, async t => {
+    const f = workspace(t); const lines = []; let probes = 0, reads = 0, clock = 0;
+    const result = await brain.saveMissingBrainDomain(f.path, {
+      guidedSetup,
+      readSubdomain: async () => { reads++; return { subdomain: "owner-subdomain" }; },
+      request: async () => { probes++; clock += 1_000; return new Response("fixture", { status: 404 }); },
+      now: () => clock, wait: async ms => { clock += ms; }, report: line => lines.push(line),
+    });
+    assert.equal(reads, 1); assert.ok(probes > 1, "the real retry and exhaustion decisions were reached");
+    assert.equal(clock, 60_000, "the existing budget is unchanged");
+    assert.equal(readFileSync(f.path, "utf8"), f.raw);
+    if (guidedSetup) {
+      assert.deepEqual(result, { status: "pending", code: "BRAIN_ADDRESS_PENDING" });
+      assert.deepEqual(lines, [], "the setup caller owns the supported resume line");
+    } else {
+      assert.equal(result, null, "update callers keep the existing optional-save result");
+      assert.equal(lines.length, 1); assert.match(lines[0], /BRAIN_DOMAIN_NOT_SAVED/);
+    }
+  });
+}
+
 test("verified persistence inserts only domain bytes and replaces the file atomically", async t => {
   const raw = JSON.stringify(fixture(), null, "\t").replaceAll("\n", "\r\n")
     .replace('"manifest_version": 1,', '"manifest_version": 1, "retained_number":9007199254740993, "retained_text":"\\u0061",') + "\r\n";

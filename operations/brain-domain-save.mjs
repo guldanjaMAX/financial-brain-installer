@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { replaceFileWithRetrySync } from "./rename-retry.mjs";
 
 export const DOMAIN_NOT_SAVED_CODE = "BRAIN_DOMAIN_NOT_SAVED";
+export const ADDRESS_PENDING_CODE = "BRAIN_ADDRESS_PENDING";
 export const DOMAIN_NOT_SAVED_LINE = "The web address could not be saved yet; this step will continue. " +
   `${DOMAIN_NOT_SAVED_CODE}: https://financialbrain.ai/help/${DOMAIN_NOT_SAVED_CODE}`;
 
@@ -44,7 +45,9 @@ export function commitMissingDomain(pin, domain, { parseStructure, pinManifest, 
  * An optional address save borrows access already held by the deploy. It never
  * acquires/renews credentials or lets a denied read escape to token recovery.
  */
-export async function saveMissingDomain(manifestPath, options, { pinManifest, persist, readSubdomain, subdomainReceipt, report }) {
+export async function saveMissingDomain(manifestPath, options, {
+  pinManifest, persist, readSubdomain, subdomainReceipt, report, isIdentityMismatch = () => false,
+}) {
   if (options.dryRun === true) return null;
   try {
     const pin = pinManifest(manifestPath);
@@ -59,7 +62,10 @@ export async function saveMissingDomain(manifestPath, options, { pinManifest, pe
       workersDevSubdomain: subdomainReceipt(account.id),
       readSubdomain: options.readSubdomain ?? (() => readSubdomain(account.id)),
     });
-  } catch {
+  } catch (error) {
+    // Setup must stop on a foreign identity. Routine update/deploy callers
+    // retain the optional-save contract and never enter credential recovery.
+    if (options.guidedSetup === true && isIdentityMismatch(error)) throw error;
     // Raw provider errors can carry private identifiers. This one line also
     // distinguishes the optional save from a failed deploy or failed update.
     (options.report ?? report)(DOMAIN_NOT_SAVED_LINE);

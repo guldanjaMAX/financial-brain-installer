@@ -14,6 +14,18 @@
     "manifest_version": {
       "const": 1
     },
+    "support": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contact_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^(https://|mailto:)",
+          "description": "Optional public HTTPS or mailto link for Contact support in the owner menu. Omit to show the installer contact step. Do not include credentials."
+        }
+      }
+    },
     "client": {
       "type": "object",
       "required": [

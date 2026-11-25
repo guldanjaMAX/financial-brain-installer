@@ -6,50 +6,132 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { confirmWorkersPaidForSetup } from "../brain.mjs";
+import {
+  confirmCloudflareWorkersPaidAccount,
+  createSetupControlAction,
+  setupWorkersPaidOptions,
+} from "../brain.mjs";
+import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 
 const ACCOUNT = "a".repeat(32);
 const BRAIN_ENTRYPOINT = fileURLToPath(new URL("../brain.mjs", import.meta.url));
 
-test("Workers Paid confirmation is bound to the exact verified account", async () => {
+// These cases run the real setup action, confirmer and production option factory.
+// Account ids use the existing trim + lowercase policy on both sides.
+async function paidControlCase({
+  workersPaidConfirmed,
+  suppliedAccountId = ACCOUNT,
+  accountId = ACCOUNT,
+  environment = {},
+  interactive = false,
+  answer = "PAID",
+} = {}) {
+  const account = { id: accountId, name: "Owner account" };
+  const counters = { confirmer: 0, runSetup: 0, selectedId: null, prompts: 0, opened: 0 };
   const lines = [];
-  const receipt = await confirmWorkersPaidForSetup(
-    { id: ACCOUNT, name: "Owner account" },
-    { confirmed: true, interactive: false, write: (line) => lines.push(line) },
-  );
-  assert.deepEqual(receipt, {
-    account_id: ACCOUNT,
-    confirmed: true,
-    source: "owner_flag",
+  let proof;
+  const options = setupWorkersPaidOptions({
+    workersPaidConfirmed, suppliedAccountId, environment, interactive,
+    askFn: async () => { counters.prompts++; return answer; },
   });
-  assert.match(lines.join("\n"), /Owner account/);
-  assert.match(lines.join("\n"), /No billing setting was changed/i);
-});
-
-test("an agent shell cannot infer or silently supply billing confirmation", async () => {
-  await assert.rejects(
-    confirmWorkersPaidForSetup(
-      { id: ACCOUNT, name: "Owner account" },
-      { interactive: false, write: () => undefined },
-    ),
-    (error) => error?.code === "WORKERS_PAID_CONFIRMATION_REQUIRED" &&
-      /No Brain or Cloudflare resources were created/i.test(error.message) &&
-      /local browser sign-in may remain saved for retry/i.test(error.message),
-  );
-});
-
-test("an owner-controlled terminal can confirm after exact account selection", async () => {
-  let prompts = 0;
-  const receipt = await confirmWorkersPaidForSetup(
-    { id: ACCOUNT, name: "Owner account" },
-    {
-      interactive: true,
-      askFn: async () => { prompts += 1; return "yes"; },
-      write: () => undefined,
+  const action = createSetupControlAction({
+    readCurrentManifest: () => null,
+    resolveSavedAccount: async () => account,
+    chooseAccount: async () => account,
+    confirmWorkersPaid: async selected => {
+      counters.confirmer++;
+      proof = await confirmCloudflareWorkersPaidAccount(selected, {
+        ...options,
+        write: line => lines.push(line),
+        openBrowserImpl: () => { counters.opened++; return true; },
+      });
     },
-  );
-  assert.equal(prompts, 1);
-  assert.equal(receipt.source, "owner_prompt");
+    runSetup: async selected => {
+      counters.runSetup++;
+      counters.selectedId = selected.id;
+      return "setup reached";
+    },
+  });
+  let error;
+  try { await action({ account }); } catch (caught) { error = caught; }
+  return { counters, error, proof, lines };
+}
+
+function assertAdvanced(result, selectedId = ACCOUNT) {
+  assert.equal(result.counters.confirmer, 1, "the real confirmer was reached once");
+  assert.equal(result.counters.runSetup, 1, "the reviewed confirmation must advance setup once");
+  assert.ifError(result.error);
+  assert.equal(result.counters.selectedId, selectedId);
+}
+
+function assertStopped(result) {
+  assert.equal(result.counters.confirmer, 1, "a refusal must reach the real confirmer");
+  assert.equal(result.counters.runSetup, 0, "unbound confirmation must not advance setup");
+  assert.equal(result.counters.selectedId, null);
+  assert.match(result.error?.message || "", /missing or different account id is not approval/i);
+}
+
+test("R1 reviewed flag advances the live control action for the exact supplied account with empty environment", async () => {
+  const result = await paidControlCase({ workersPaidConfirmed: true });
+  assertAdvanced(result);
+  assert.equal(result.proof.account_id, ACCOUNT);
+  assert.equal(result.counters.prompts, 0);
+  assert.equal(result.counters.opened, 0);
+  assert.doesNotMatch(result.lines.join("\n"), /No Cloudflare resource|Nothing was created|billing (?:status )?(?:was )?verified/i);
+});
+
+test("R2 missing, malformed and different supplied ids cannot bind the reviewed flag", async () => {
+  for (const suppliedAccountId of [null, "", " ", "not-an-account", "a".repeat(31), "a".repeat(33), "b".repeat(32), `a ${"a".repeat(31)}`]) {
+    assertStopped(await paidControlCase({ workersPaidConfirmed: true, suppliedAccountId }));
+    assertAdvanced(await paidControlCase({ workersPaidConfirmed: true }));
+  }
+});
+
+test("R2 account equality applies trim and lowercase to both ids", async () => {
+  for (const [accountId, suppliedAccountId] of [
+    [ACCOUNT, ` ${ACCOUNT.toUpperCase()} `],
+    [` ${ACCOUNT.toUpperCase()} `, ACCOUNT],
+    [` ${ACCOUNT.toUpperCase()} `, ` ${ACCOUNT.toUpperCase()} `],
+  ]) {
+    const result = await paidControlCase({ workersPaidConfirmed: true, accountId, suppliedAccountId });
+    assertAdvanced(result, accountId);
+    assert.equal(result.proof.account_id, ACCOUNT);
+    assertStopped(await paidControlCase({ workersPaidConfirmed: true, accountId, suppliedAccountId: ` ${"b".repeat(32).toUpperCase()} ` }));
+  }
+});
+
+test("R3 absent or non-boolean flag cannot invent consent, including generic yes and foreign environment ids", async () => {
+  for (const workersPaidConfirmed of [undefined, false, "true"]) {
+    for (const environment of [
+      {},
+      { BRAIN_WORKERS_PAID_CONFIRMED: "1" },
+      { BRAIN_WORKERS_PAID_ACCOUNT_ID: "b".repeat(32) },
+    ]) {
+      assertStopped(await paidControlCase({ workersPaidConfirmed, environment }));
+      assertAdvanced(await paidControlCase({
+        workersPaidConfirmed: false,
+        environment: { BRAIN_WORKERS_PAID_ACCOUNT_ID: ` ${ACCOUNT.toUpperCase()} ` },
+      }));
+    }
+  }
+});
+
+test("R3 existing exact-account environment and interactive PAID controls remain live", async () => {
+  const environment = await paidControlCase({ environment: { BRAIN_WORKERS_PAID_ACCOUNT_ID: ACCOUNT } });
+  assertAdvanced(environment);
+  assert.equal(environment.proof.confirmation, "account_bound_automation");
+  const interactive = await paidControlCase({ interactive: true });
+  assertAdvanced(interactive);
+  assert.equal(interactive.counters.prompts, 1);
+  assert.equal(interactive.counters.opened, 1);
+  assert.equal(interactive.proof.confirmation, "owner_dashboard");
+  for (const answer of ["", "yes"]) {
+    const stopped = await paidControlCase({ interactive: true, answer });
+    assert.equal(stopped.counters.confirmer, 1);
+    assert.equal(stopped.counters.prompts, 1);
+    assert.equal(stopped.counters.runSetup, 0);
+    assert.match(stopped.error?.message || "", /billing approval belongs to the owner/i);
+  }
 });
 
 test("Claude-guided fresh browser sign-in refuses incomplete owner context before preflight", () => {
@@ -57,6 +139,7 @@ test("Claude-guided fresh browser sign-in refuses incomplete owner context befor
   try {
     const brain = BRAIN_ENTRYPOINT;
     const result = spawnSync(process.execPath, [
+      "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
       brain,
       "setup",
       join(sandbox, "brain.manifest.json"),
@@ -64,12 +147,7 @@ test("Claude-guided fresh browser sign-in refuses incomplete owner context befor
     ], {
       cwd: sandbox,
       encoding: "utf8",
-      env: {
-        PATH: process.env.PATH || "",
-        HOME: sandbox,
-        USERPROFILE: sandbox,
-        LOCALAPPDATA: sandbox,
-      },
+      env: cliTestEnvironment(sandbox),
     });
     const output = `${result.stdout || ""}\n${result.stderr || ""}`;
     assert.equal(result.status, 1);
@@ -90,6 +168,7 @@ test("explicit browser sign-in cannot silently fall back to an inherited automat
     const brain = BRAIN_ENTRYPOINT;
     const manifest = join(sandbox, "brain.manifest.json");
     const result = spawnSync(process.execPath, [
+      "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
       brain,
       "setup",
       manifest,
@@ -106,13 +185,9 @@ test("explicit browser sign-in cannot silently fall back to an inherited automat
     ], {
       cwd: sandbox,
       encoding: "utf8",
-      env: {
-        PATH: process.env.PATH || "",
-        HOME: sandbox,
-        USERPROFILE: sandbox,
-        LOCALAPPDATA: sandbox,
-        CLOUDFLARE_API_TOKEN: "fixture-automation-token",
-      },
+      env: cliTestEnvironment(sandbox, {
+        CLOUDFLARE_API_TOKEN: ["fixture", "automation", "token"].join("-"),
+      }),
     });
     const output = `${result.stdout || ""}\n${result.stderr || ""}`;
     assert.equal(result.status, 1);
@@ -132,6 +207,7 @@ test("Claude-guided setup rejects an unsafe slug before browser sign-in", () => 
     const brain = BRAIN_ENTRYPOINT;
     const manifest = join(sandbox, "brain.manifest.json");
     const result = spawnSync(process.execPath, [
+      "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
       brain,
       "setup",
       manifest,
@@ -148,12 +224,7 @@ test("Claude-guided setup rejects an unsafe slug before browser sign-in", () => 
     ], {
       cwd: sandbox,
       encoding: "utf8",
-      env: {
-        PATH: process.env.PATH || "",
-        HOME: sandbox,
-        USERPROFILE: sandbox,
-        LOCALAPPDATA: sandbox,
-      },
+      env: cliTestEnvironment(sandbox),
     });
     const output = `${result.stdout || ""}\n${result.stderr || ""}`;
     assert.equal(result.status, 1);

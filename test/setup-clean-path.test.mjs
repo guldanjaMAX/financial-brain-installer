@@ -1,3 +1,4 @@
+import { setupSettingsProofFixture } from "./helpers/setup-settings-proof-fixture.mjs";
 import assert from "node:assert/strict";
 import { validateBankProviderManifest } from "../operations/bank-provider-command.mjs";
 const manifestSchema = JSON.parse(readFileSync(new URL("../manifest.schema.json", import.meta.url), "utf8"));
@@ -178,9 +179,11 @@ try {
   validateBankProviderManifest(saved, manifestSchema);
   assert.equal(readInstalledManifest(installedManifestOptions), realpathSync.native(target));
 
+  const resumedProof = setupSettingsProofFixture(target, { account: oneAccount });
   const resumedEvents = [];
   let resumedPinnedPath = null;
   await cmdSetup(target, {
+    ...resumedProof.options,
     ask: prompt,
     doctorRunAll: async () => [],
     setupWorkerScriptExists: async (path) => {
@@ -233,6 +236,7 @@ try {
     backlogCount: async () => 0,
     installedManifestOptions,
   });
+  resumedProof.assertReads();
   assert.deepEqual(resumedEvents, [
     "verify",
     "provision",
@@ -253,8 +257,12 @@ try {
   // used to pause it and walk it back into the cutover purely because the
   // Worker existed, and every error message in that state suggested setup.
   const runningVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+  const liveProof = setupSettingsProofFixture(target, {
+    account: oneAccount, version: runningVersion, writerProtocol: "lease-v1",
+  });
   const liveEvents = [];
   await cmdSetup(target, {
+    ...liveProof.options,
     ask: prompt,
     doctorRunAll: async () => [],
     setupWorkerScriptExists: async () => true,
@@ -274,17 +282,21 @@ try {
     backlogCount: async () => 0,
     installedManifestOptions,
   });
+  liveProof.assertReads();
   assert.deepEqual(liveEvents, ["verify", "provision", "secrets", "drain", "health:durable", "wire"],
     "a live brain on this release is neither paused, migrated nor redeployed by setup");
 
   // On another release, setup names the right tool and touches nothing.
+  const otherProof = setupSettingsProofFixture(target, {
+    account: oneAccount, version: "0.0.1", writerProtocol: "lease-v1",
+  });
   const otherEvents = [];
   await assert.rejects(
     () => cmdSetup(target, {
+      ...otherProof.options,
       ask: prompt,
       doctorRunAll: async () => [],
       setupWorkerScriptExists: async () => true,
-      probeExistingWorkerHealth: async () => ({ version: "0.0.1", acceptingDocuments: true }),
       captureSetupD1Bookmark: async () => { otherEvents.push("bookmark"); return "never"; },
       waitForVectorDrainQuiescence: async () => { otherEvents.push("wait"); },
       configureStandardAdminKeyStorage: () => ({ changed: false }),
@@ -303,13 +315,17 @@ try {
     (error) => /already installed and live on version 0\.0\.1/.test(String(error?.message || error)) &&
       /brain update/.test(String(error?.message || error)),
   );
+  otherProof.assertReads(0);
+  assert.equal(otherProof.reads.liveProbe, 1, "the other-version guard was reached before proof");
   assert.deepEqual(otherEvents, ["verify", "provision"], "nothing after the check runs on a brain from another release");
 
   // An interrupted projection bootstrap is a durable partial success: setup
   // stops before full health/wiring, and a rerun invokes the same drain again
   // so its D1 cursor can resume before setup is allowed to turn green.
+  const convergenceProof = setupSettingsProofFixture(target, { account: oneAccount });
   const convergenceEvents = [];
   const convergenceOptions = {
+    ...convergenceProof.options,
     ask: prompt,
     doctorRunAll: async () => [],
     setupWorkerScriptExists: async () => true,
@@ -342,11 +358,13 @@ try {
     }),
     /durable bootstrap timeout.*resume/i,
   );
+  convergenceProof.assertReads();
   assert.deepEqual(convergenceEvents, ["secrets", "drain:partial"]);
   await cmdSetup(target, {
     ...convergenceOptions,
     cmdDrain: async () => { convergenceEvents.push("drain:resumed"); },
   });
+  convergenceProof.assertReads(2);
   assert.deepEqual(convergenceEvents, [
     "secrets",
     "drain:partial",
@@ -360,9 +378,11 @@ try {
   // during the old-invocation grace window. The pinned compatibility Worker
   // remains safe and no migration/active deployment runs.
   const stableManifest = readFileSync(target, "utf8");
+  const driftProof = setupSettingsProofFixture(target, { account: oneAccount });
   const driftEvents = [];
   await assert.rejects(
     cmdSetup(target, {
+      ...driftProof.options,
       ask: prompt,
       doctorRunAll: async () => [],
       setupWorkerScriptExists: async () => true,
@@ -390,12 +410,15 @@ try {
     }),
     /manifest changed.*no later stage|verified vector-writer cutover/i,
   );
+  driftProof.assertReads();
   assert.deepEqual(driftEvents, ["paused", "wait"]);
   writeFileSync(target, stableManifest);
 
+  const activeHealthProof = setupSettingsProofFixture(target, { account: oneAccount });
   const activeHealthEvents = [];
   await assert.rejects(
     cmdSetup(target, {
+      ...activeHealthProof.options,
       ask: prompt,
       doctorRunAll: async () => [],
       setupWorkerScriptExists: async () => true,
@@ -420,6 +443,7 @@ try {
     }),
     /synthetic active mode not live/,
   );
+  activeHealthProof.assertReads();
   assert.deepEqual(activeHealthEvents, [
     "paused", "health:paused-for-upgrade", "wait", "migrate", "active", "health:active",
   ]);
@@ -510,8 +534,10 @@ try {
   assert.equal(partialMutations, 0);
   assert.equal(partialDb.prepare("SELECT COUNT(*) count FROM schema_migrations").get().count, 0);
 
+  const partialProof = setupSettingsProofFixture(partialManifest, { account: oneAccount });
   partialEvents.length = 0;
   await cmdSetup(partialManifest, {
+    ...partialProof.options,
     ask: prompt,
     doctorRunAll: async () => [],
     setupWorkerScriptExists: async () => true,
@@ -550,6 +576,7 @@ try {
     backlogCount: async () => 0,
     installedManifestOptions,
   });
+  partialProof.assertReads();
   assert.deepEqual(partialEvents, [
     "verify",
     "provision",

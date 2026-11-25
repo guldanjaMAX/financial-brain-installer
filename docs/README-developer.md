@@ -173,6 +173,11 @@ node brain.mjs ingest     ./acme.manifest.json --path ~/Documents --source clien
 node brain.mjs test       ./acme.manifest.json   # full acceptance suite
 ```
 
+Set `support.contact_url` in the manifest to a public HTTPS or mailto link for
+the owner menu's Help panel. Setup and deploy carry it into the signed-in
+owner's session response. With the field omitted, Help directs the owner to
+the person who installed the Brain.
+
 The held candidate existing-Brain gate is:
 
 ```bash

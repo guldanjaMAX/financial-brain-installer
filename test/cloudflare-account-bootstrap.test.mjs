@@ -86,7 +86,9 @@ test("Workers Paid confirmation is bound to the exact verified account before pr
   assert.match(prompts[0], new RegExp(accountId));
   assert.match(prompts[0], /Workers & Pages > Plans > Paid/i);
   assert.deepEqual(proof, { account_id: accountId, confirmation: "owner_dashboard" });
-  assert.match(lines.join("\n"), /exact verified account.*No Cloudflare resource has been created yet/i);
+  assert.match(lines.join("\n"), /confirmed by the owner for the exact verified account/i);
+  assert.doesNotMatch(lines.join("\n"), /No Cloudflare resource|Nothing was created/i,
+    "the confirmation boundary cannot prove earlier setup performed no writes");
 
   await assert.rejects(
     confirmCloudflareWorkersPaidAccount(account, {
@@ -95,7 +97,7 @@ test("Workers Paid confirmation is bound to the exact verified account before pr
       askFn: async () => "",
       write: () => {},
     }),
-    /stopped before creating any Cloudflare resource.*exact account.*billing approval belongs to the owner/i,
+    /stopped at the Workers Paid confirmation.*exact account.*billing approval belongs to the owner/i,
   );
 });
 
@@ -119,11 +121,11 @@ test("unattended setup requires an account-bound Workers Paid confirmation", asy
       openBrowserImpl: () => { throw new Error("must not open"); },
       write: () => {},
     }),
-    /unattended setup stopped before creating any Cloudflare resource.*missing or different account id is not approval/i,
+    /Workers Paid confirmation is still needed.*missing or different account id is not approval/i,
   );
 });
 
-test("every public setup lane confirms the verified account before setup can write", () => {
+test("every public setup lane confirms the verified account before invoking runSetup", () => {
   const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
   const helper = source.indexOf("export function createSetupControlAction");
   const wrapper = source.indexOf("async function cmdSetupInteractive");
@@ -139,6 +141,9 @@ test("every public setup lane confirms the verified account before setup can wri
     /readCurrentManifest:\s*\(\)\s*=>\s*existsSync\(target\)\s*\?\s*loadManifest\(target\)\.m\s*:\s*null/,
     "the real setup wrapper must reread the manifest written by the first recovery attempt",
   );
+  assert.match(wrapperWiring,
+    /confirmWorkersPaid: selectedAccount => confirmCloudflareWorkersPaidAccount\(selectedAccount, setupWorkersPaidOptions\(\{\s*interactive,\s*askFn: ask,\s*environment: process\.env,\s*workersPaidConfirmed,\s*suppliedAccountId,\s*\}\)\)/,
+    "the live closure must use the tested option factory and forward both reviewed choices");
   assert.doesNotMatch(
     wrapperWiring,
     /readCurrentManifest:\s*\(\)\s*=>\s*manifest\b/,

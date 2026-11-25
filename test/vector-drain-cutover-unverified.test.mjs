@@ -1,3 +1,4 @@
+import { setupSettingsProofFixture } from "./helpers/setup-settings-proof-fixture.mjs";
 /**
  * The vector-drain cutover must never report success it did not earn.
  *
@@ -144,8 +145,10 @@ async function captured(action) {
       return fallback || "";
     };
 
+    const settingsProof = setupSettingsProofFixture(target, { account });
     const migrateOptions = [];
     await captured(() => cmdSetup(target, {
+      ...settingsProof.options,
       ask: prompt,
       doctorRunAll: async () => [],
       listCloudflareAccounts: async () => [account],
@@ -174,6 +177,7 @@ async function captured(action) {
       installedManifestOptions,
     }));
 
+    settingsProof.assertReads();
     assert.equal(migrateOptions.length, 1, JSON.stringify(migrateOptions));
     assert.equal(
       migrateOptions[0].vectorDrainQuiesced,

@@ -812,6 +812,10 @@ resource is created:
   exact account; then open its **Workers & Pages > Plans** page and have the
   owner confirm **Paid**. The narrow session proves account/product access,
   never billing status; Vectorize access does not prove Paid.
+- Choose Workers Paid for setup. Do not add Images or Stream for the Brain; it
+  does not use those services.
+- Read billing names with `brain doctor <manifest> --subscriptions "<name>;<name>"`.
+  Check other projects and terms before owner-only cancellation.
 - Approved browser control handles non-secret navigation. Stop for sign-in,
   2FA, account choice, plan/payment/billing changes and consent. Ask one action.
 

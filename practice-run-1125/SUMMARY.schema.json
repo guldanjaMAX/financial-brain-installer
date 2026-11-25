@@ -1,0 +1,1644 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:practice-summary:4",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kit_version",
+    "tool_version",
+    "round_timings",
+    "steps",
+    "measurements",
+    "gap_count"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 4
+    },
+    "kit_version": {
+      "const": "7.0.0"
+    },
+    "tool_version": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,2})\\.(?:0|[1-9][0-9]{0,2})\\.(?:0|[1-9][0-9]{0,2})$",
+      "maxLength": 11
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 42,
+      "maxItems": 42,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "started_at",
+          "ended_at",
+          "duration_ms",
+          "error_code",
+          "counts",
+          "interruption",
+          "recovery_attempts",
+          "max_mark_gap_ms",
+          "proof_order"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "enum": [
+              "A0",
+              "A1",
+              "A2",
+              "A3",
+              "A4",
+              "A5",
+              "A6",
+              "A7",
+              "A8",
+              "1",
+              "2",
+              "3",
+              "4",
+              "5",
+              "6",
+              "7",
+              "8",
+              "9",
+              "10",
+              "11",
+              "12",
+              "13",
+              "14",
+              "15",
+              "16",
+              "17",
+              "18",
+              "19",
+              "20",
+              "21",
+              "22",
+              "23",
+              "24",
+              "25",
+              "26",
+              "27",
+              "28",
+              "29",
+              "30",
+              "31",
+              "32",
+              "33"
+            ]
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "GAP",
+              "NOT RUN"
+            ]
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "pattern": "^20[2-9][0-9]-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+                "maxLength": 24
+              }
+            ]
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "pattern": "^20[2-9][0-9]-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+                "maxLength": 24
+              }
+            ]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800000
+          },
+          "error_code": {
+            "enum": [
+              "NONE",
+              "STEP_NOT_RUN",
+              "STEP_INCOMPLETE",
+              "CHECK_FAILED",
+              "STOP_RULE",
+              "HOST_UNAVAILABLE",
+              "PHASE_NOT_RUN",
+              "PHASE_FAILED",
+              "KNOWN_GAP"
+            ]
+          },
+          "counts": {
+            "type": "object",
+            "required": [
+              "marks",
+              "owner_starts"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "marks": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "owner_starts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "interruption": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "stop",
+                  "partial",
+                  "recovery",
+                  "checks"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "stop": {
+                    "enum": [
+                      "PASS",
+                      "FAIL",
+                      "NOT RUN"
+                    ]
+                  },
+                  "partial": {
+                    "enum": [
+                      "PASS",
+                      "FAIL",
+                      "NOT RUN"
+                    ]
+                  },
+                  "recovery": {
+                    "enum": [
+                      "PASS",
+                      "FAIL",
+                      "NOT RUN"
+                    ]
+                  },
+                  "checks": {
+                    "enum": [
+                      "PASS",
+                      "FAIL",
+                      "NOT RUN"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "recovery_attempts": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "result",
+                "progress_ms",
+                "duration_ms"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "OWNER",
+                    "TERMINAL"
+                  ]
+                },
+                "result": {
+                  "enum": [
+                    "PROGRESS",
+                    "FAILED",
+                    "TIMEOUT",
+                    "INCOMPLETE"
+                  ]
+                },
+                "progress_ms": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800000
+                    }
+                  ]
+                },
+                "duration_ms": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800000
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "max_mark_gap_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800000
+          },
+          "proof_order": {
+            "type": "object",
+            "required": [
+              "stop",
+              "partial",
+              "recovery",
+              "checks_start",
+              "checks"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stop": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "partial": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "recovery": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "checks_start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "checks": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            }
+          }
+        }
+      }
+    },
+    "round_timings": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "required": [
+          "round",
+          "duration_ms",
+          "max_mark_gap_ms"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "round": {
+            "enum": [
+              "A",
+              "B"
+            ]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800000
+          },
+          "max_mark_gap_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800000
+          }
+        }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "required": [
+        "machine",
+        "package_size_bytes",
+        "rounds",
+        "rows",
+        "substeps",
+        "codes",
+        "resources",
+        "screens",
+        "lowest_three",
+        "observations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "machine": {
+          "enum": [
+            "mac",
+            "windows"
+          ]
+        },
+        "package_size_bytes": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            }
+          ]
+        },
+        "rounds": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "required": [
+              "round",
+              "setup_ms",
+              "bank_ms",
+              "owner_initial_ms",
+              "owner_return_ms",
+              "longest_screen_silence_ms",
+              "sign_ins",
+              "approvals"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "round": {
+                "enum": [
+                  "A",
+                  "B"
+                ]
+              },
+              "setup_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "bank_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "owner_initial_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "owner_return_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "longest_screen_silence_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "sign_ins": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                ]
+              },
+              "approvals": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 42,
+          "maxItems": 42,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "owner_present_ms",
+              "longest_screen_silence_ms",
+              "sign_ins",
+              "approvals",
+              "questions",
+              "lock_wait_ms",
+              "blocked_window_ms",
+              "gap_code",
+              "gap_result",
+              "owner_gap_decision"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "enum": [
+                  "A0",
+                  "A1",
+                  "A2",
+                  "A3",
+                  "A4",
+                  "A5",
+                  "A6",
+                  "A7",
+                  "A8",
+                  "1",
+                  "2",
+                  "3",
+                  "4",
+                  "5",
+                  "6",
+                  "7",
+                  "8",
+                  "9",
+                  "10",
+                  "11",
+                  "12",
+                  "13",
+                  "14",
+                  "15",
+                  "16",
+                  "17",
+                  "18",
+                  "19",
+                  "20",
+                  "21",
+                  "22",
+                  "23",
+                  "24",
+                  "25",
+                  "26",
+                  "27",
+                  "28",
+                  "29",
+                  "30",
+                  "31",
+                  "32",
+                  "33"
+                ]
+              },
+              "owner_present_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "longest_screen_silence_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "sign_ins": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                ]
+              },
+              "approvals": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                ]
+              },
+              "questions": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                ]
+              },
+              "lock_wait_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "blocked_window_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "gap_code": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "NONE",
+                      "G1",
+                      "G2",
+                      "G3",
+                      "G4",
+                      "G5",
+                      "G6",
+                      "G7"
+                    ]
+                  }
+                ]
+              },
+              "gap_result": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "PASS",
+                      "FAIL",
+                      "GAP"
+                    ]
+                  }
+                ]
+              },
+              "owner_gap_decision": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "PENDING",
+                      "ACCEPTED",
+                      "REJECTED"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "substeps": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "duration_ms"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "enum": [
+                  "A2a",
+                  "A2b",
+                  "A2c",
+                  "A2d",
+                  "A2e",
+                  "A2f",
+                  "A2g"
+                ]
+              },
+              "duration_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "codes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": [
+              "ordinal",
+              "lifetime_ms",
+              "approval_delay_ms",
+              "outcome"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "ordinal": {
+                "enum": [
+                  1,
+                  2,
+                  3
+                ]
+              },
+              "lifetime_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "approval_delay_ms": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 604800000
+                  }
+                ]
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "EXPIRED",
+                      "APPROVED",
+                      "NOT_APPLICABLE"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 85,
+          "maxItems": 85,
+          "items": {
+            "type": "object",
+            "required": [
+              "point",
+              "counts"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "point": {
+                "enum": [
+                  "BASELINE",
+                  "BEFORE_A0",
+                  "BEFORE_A1",
+                  "BEFORE_A2",
+                  "BEFORE_A3",
+                  "BEFORE_A4",
+                  "BEFORE_A5",
+                  "BEFORE_A6",
+                  "BEFORE_A7",
+                  "BEFORE_A8",
+                  "BEFORE_1",
+                  "BEFORE_2",
+                  "BEFORE_3",
+                  "BEFORE_4",
+                  "BEFORE_5",
+                  "BEFORE_6",
+                  "BEFORE_7",
+                  "BEFORE_8",
+                  "BEFORE_9",
+                  "BEFORE_10",
+                  "BEFORE_11",
+                  "BEFORE_12",
+                  "BEFORE_13",
+                  "BEFORE_14",
+                  "BEFORE_15",
+                  "BEFORE_16",
+                  "BEFORE_17",
+                  "BEFORE_18",
+                  "BEFORE_19",
+                  "BEFORE_20",
+                  "BEFORE_21",
+                  "BEFORE_22",
+                  "BEFORE_23",
+                  "BEFORE_24",
+                  "BEFORE_25",
+                  "BEFORE_26",
+                  "BEFORE_27",
+                  "BEFORE_28",
+                  "BEFORE_29",
+                  "BEFORE_30",
+                  "BEFORE_31",
+                  "BEFORE_32",
+                  "BEFORE_33",
+                  "AFTER_A0",
+                  "AFTER_A1",
+                  "AFTER_A2",
+                  "AFTER_A3",
+                  "AFTER_A4",
+                  "AFTER_A5",
+                  "AFTER_A6",
+                  "AFTER_A7",
+                  "AFTER_A8",
+                  "AFTER_1",
+                  "AFTER_2",
+                  "AFTER_3",
+                  "AFTER_4",
+                  "AFTER_5",
+                  "AFTER_6",
+                  "AFTER_7",
+                  "AFTER_8",
+                  "AFTER_9",
+                  "AFTER_10",
+                  "AFTER_11",
+                  "AFTER_12",
+                  "AFTER_13",
+                  "AFTER_14",
+                  "AFTER_15",
+                  "AFTER_16",
+                  "AFTER_17",
+                  "AFTER_18",
+                  "AFTER_19",
+                  "AFTER_20",
+                  "AFTER_21",
+                  "AFTER_22",
+                  "AFTER_23",
+                  "AFTER_24",
+                  "AFTER_25",
+                  "AFTER_26",
+                  "AFTER_27",
+                  "AFTER_28",
+                  "AFTER_29",
+                  "AFTER_30",
+                  "AFTER_31",
+                  "AFTER_32",
+                  "AFTER_33"
+                ]
+              },
+              "counts": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "databases",
+                      "search_indexes",
+                      "workers",
+                      "web_addresses",
+                      "settings_files",
+                      "tmp_files",
+                      "connector_entries",
+                      "lock_folders",
+                      "answer_journals",
+                      "tools_folders",
+                      "test_notes",
+                      "saved_sign_ins",
+                      "devices",
+                      "schedules"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "databases": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "search_indexes": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "workers": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "web_addresses": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "settings_files": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "tmp_files": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "connector_entries": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "lock_folders": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "answer_journals": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "tools_folders": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "test_notes": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "saved_sign_ins": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "devices": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      },
+                      "schedules": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10000
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "screens": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": [
+              "ordinal",
+              "row",
+              "kind",
+              "gap",
+              "model",
+              "fresh"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "ordinal": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+              },
+              "row": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "A0",
+                      "A1",
+                      "A2",
+                      "A3",
+                      "A4",
+                      "A5",
+                      "A6",
+                      "A7",
+                      "A8",
+                      "1",
+                      "2",
+                      "3",
+                      "4",
+                      "5",
+                      "6",
+                      "7",
+                      "8",
+                      "9",
+                      "10",
+                      "11",
+                      "12",
+                      "13",
+                      "14",
+                      "15",
+                      "16",
+                      "17",
+                      "18",
+                      "19",
+                      "20",
+                      "21",
+                      "22",
+                      "23",
+                      "24",
+                      "25",
+                      "26",
+                      "27",
+                      "28",
+                      "29",
+                      "30",
+                      "31",
+                      "32",
+                      "33",
+                      "A2a",
+                      "A2b",
+                      "A2c",
+                      "A2d",
+                      "A2e",
+                      "A2f",
+                      "A2g"
+                    ]
+                  }
+                ]
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "STANDARD",
+                      "ERROR"
+                    ]
+                  }
+                ]
+              },
+              "gap": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "NONE",
+                      "G6",
+                      "G7"
+                    ]
+                  }
+                ]
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "action",
+                      "jargon",
+                      "time",
+                      "clicks",
+                      "next",
+                      "kind_words",
+                      "diagnostics",
+                      "total"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "jargon": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "time": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "clicks": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "next": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "kind_words": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "enum": [
+                              "YES",
+                              "NO",
+                              "NOT_APPLICABLE"
+                            ]
+                          }
+                        ]
+                      },
+                      "diagnostics": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "enum": [
+                              "YES",
+                              "NO",
+                              "NOT_APPLICABLE"
+                            ]
+                          }
+                        ]
+                      },
+                      "total": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "fresh": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "action",
+                      "jargon",
+                      "time",
+                      "clicks",
+                      "next",
+                      "kind_words",
+                      "diagnostics",
+                      "total"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "jargon": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "time": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "clicks": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "next": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 2
+                          }
+                        ]
+                      },
+                      "kind_words": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "enum": [
+                              "YES",
+                              "NO",
+                              "NOT_APPLICABLE"
+                            ]
+                          }
+                        ]
+                      },
+                      "diagnostics": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "enum": [
+                              "YES",
+                              "NO",
+                              "NOT_APPLICABLE"
+                            ]
+                          }
+                        ]
+                      },
+                      "total": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "lowest_three": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
+        },
+        "observations": {
+          "type": "object",
+          "required": [
+            "vectorize_key_asked",
+            "closing_line_seen",
+            "restart_steps_seen",
+            "bank_sync_proven",
+            "first_question",
+            "phone_link_route",
+            "finished_setup",
+            "finished_note",
+            "finished_answers",
+            "finished_device",
+            "finished_checks",
+            "finished_question"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "vectorize_key_asked": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "YES",
+                    "NO"
+                  ]
+                }
+              ]
+            },
+            "closing_line_seen": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "YES",
+                    "NO"
+                  ]
+                }
+              ]
+            },
+            "restart_steps_seen": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "YES",
+                    "NO"
+                  ]
+                }
+              ]
+            },
+            "bank_sync_proven": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "YES",
+                    "NO"
+                  ]
+                }
+              ]
+            },
+            "first_question": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "DOCUMENT",
+                    "MONEY"
+                  ]
+                }
+              ]
+            },
+            "phone_link_route": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "CAMERA",
+                    "MESSAGE",
+                    "SAME_DEVICE",
+                    "OTHER"
+                  ]
+                }
+              ]
+            },
+            "finished_setup": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "PASS",
+                    "FAIL"
+                  ]
+                }
+              ]
+            },
+            "finished_note": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "PASS",
+                    "FAIL"
+                  ]
+                }
+              ]
+            },
+            "finished_answers": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "PASS",
+                    "FAIL"
+                  ]
+                }
+              ]
+            },
+            "finished_device": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "PASS",
+                    "FAIL"
+                  ]
+                }
+              ]
+            },
+            "finished_checks": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "PASS",
+                    "FAIL"
+                  ]
+                }
+              ]
+            },
+            "finished_question": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "enum": [
+                    "PASS",
+                    "FAIL"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "gap_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 42
+    }
+  }
+}

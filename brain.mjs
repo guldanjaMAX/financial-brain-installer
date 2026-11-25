@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ensureWorkersDevSubdomain, maskedSubdomainMessage } from "./operations/workers-subdomain.mjs";
-import { commitMissingDomain, saveMissingDomain } from "./operations/brain-domain-save.mjs";
+import { ADDRESS_PENDING_CODE, commitMissingDomain, saveMissingDomain } from "./operations/brain-domain-save.mjs";
+import { proveSetupSettings } from "./operations/setup-settings-proof.mjs";
 import { calendarDeliveryDigest, sendCalendarWindows } from "./connectors/calendar-delivery.mjs";
 import { markCalendarCancellations, pendingCalendarCancellations } from './operations/calendar-cancellations.mjs';
 import { processGmailEntries, gmailDeadlineError, gmailDeadlineSleep } from "./operations/gmail-entry.mjs";
@@ -320,6 +321,7 @@ import {
   CF_TOKEN_REJECTED_REMEDY,
   isCredentialRejection,
 } from "./doctor.mjs";
+import { parseSubscriptionNames, renderSubscriptionSection, WORKERS_PAID_SETUP_NOTICE, WORKERS_PAID_BUNDLE_WARNING } from "./operations/cloudflare-subscriptions.mjs";
 import {
   SUPPORT_MAX_AGE_DAYS,
   SUPPORT_MAX_BYTES,
@@ -582,6 +584,7 @@ const sayErr = (s) => console.error(renderCliCommands(s));
  * vanish from the history.
  */
 class Fatal extends Error {}
+class WorkersDevIdentityMismatch extends Fatal {}
 // A queue decision is a successful safety refusal, not a failed migration.
 // Keep it distinct so the upgrade catch cannot write a misleading history row
 // or append bookmark and rerun guidance that contradicts the refusal itself.
@@ -2888,7 +2891,9 @@ async function verifyWorkersDevCandidate(domain, {
     );
     const verdict = await probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs });
     tried = attempt;
-    if (verdict.ok || !verdict.retry) return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
+    if (verdict.ok || !verdict.retry) return verdict.ok ? { ok: true } : {
+      ok: false, reason: verdict.reason, identityMismatch: verdict.identityMismatch === true,
+    };
     reason = verdict.reason;
     if (attempt >= attempts) break;
     // Another probe must fit its minimum timeout after this wait, or the
@@ -2898,7 +2903,7 @@ async function verifyWorkersDevCandidate(domain, {
     info(`${verdict.progress} Retrying ${attempt}/${attempts} in ${Math.ceil(delayMs / 1_000)} second(s).`);
     await wait(delayMs);
   }
-  return { ok: false, reason: `${reason} after ${tried} attempt${tried === 1 ? "" : "s"}` };
+  return { ok: false, pending: true, reason: `${reason} after ${tried} attempt${tried === 1 ? "" : "s"}` };
 }
 
 const WORKERS_DEV_PROPAGATION_NOTE = "This is normal just after a deploy.";
@@ -2936,7 +2941,8 @@ async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVer
     return { ok: false, retry: false, reason: "/health returned no readable body" };
   }
   if (parsed.brain !== expectedBrainName) {
-    return { ok: false, retry: false, reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
+    return { ok: false, retry: false, identityMismatch: true,
+      reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
   }
   if (expectedVersion && parsed.version !== expectedVersion) {
     // Cloudflare keeps serving the replaced build for a while after a deploy.
@@ -3060,12 +3066,20 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     now: options.now,
   });
   if (!candidateVerdict.ok) {
-    die(
+    // Only exhausted retryable probes are propagation. A foreign identity
+    // must survive setup's optional-save boundary as a hard stop.
+    if (options.guidedSetup === true && candidateVerdict.pending === true) {
+      return { status: "pending", code: ADDRESS_PENDING_CODE };
+    }
+    const message =
       "the workers.dev route is enabled, but its exact account hostname was not confirmed as this brain.\n" +
         `  ${candidateVerdict.reason}. No address was saved and no admin key was sent to that host.\n` +
-        "  Once the workers.dev route finishes propagating, resume with:\n" +
-        `    brain setup ${commandPath(displayPath(manifestPath))}`
-    );
+        (candidateVerdict.identityMismatch === true
+          ? "  Confirm the exact account and Worker identity before retrying setup."
+          : "  Once the workers.dev route finishes propagating, resume with:\n" +
+            `    brain setup ${commandPath(displayPath(manifestPath))}`);
+    if (candidateVerdict.identityMismatch === true) throw new WorkersDevIdentityMismatch(message);
+    die(message);
   }
   const domain = commitMissingDomain(domainPin, candidateDomain, {
     parseStructure: parseLosslessJsonStructure, pinManifest: pinUpdateManifest,
@@ -3085,6 +3099,7 @@ export function saveMissingBrainDomain(manifestPath, options = {}) {
     readSubdomain: (accountId) => cfOnce(`/accounts/${accountId}/workers/subdomain`),
     subdomainReceipt: activeWorkersDevSubdomainReceipt,
     report: info,
+    isIdentityMismatch: error => error instanceof WorkersDevIdentityMismatch,
   });
 }
 
@@ -3224,6 +3239,9 @@ export function workerBindings(m, cfg, options = {}) {
         : []),
       { type: "plain_text", name: "BRAIN_NAME", text: m.client?.slug || "brain" },
       { type: "plain_text", name: "BRAIN_OWNER", text: m.client?.display_name || "the owner" },
+      ...(typeof m.support?.contact_url === "string" && m.support.contact_url.trim()
+        ? [{ type: "plain_text", name: "BRAIN_SUPPORT_CONTACT_URL", text: m.support.contact_url.trim() }]
+        : []),
       ...(typeof m.client?.timezone === "string" && m.client.timezone
         ? [{ type: "plain_text", name: "BRAIN_TIMEZONE", text: m.client.timezone }]
         : []),
@@ -9593,7 +9611,7 @@ export const VALUE_FLAGS = new Set([
   // being read as a boolean and then reported as "needs --file".
   "file", "format", "account", "account-kind", "name", "slug", "institution", "currency", "entity", "entity-label",
   "year", "period-start", "period-end", "sections", "cursor", "provenance-baseline",
-  "definition-hash",
+  "definition-hash", "subscriptions",
 ]);
 
 /** Read an exact Drive-id exclusion list from either its portable shape or a migration receipt. */
@@ -23096,14 +23114,18 @@ function printOwnerChecklist(text) {
 }
 
 export async function cmdDoctor(manifestPath, options = {}) {
+  // Reject malformed labels before any credential or diagnostic boundary.
+  let subscriptionNames = parseSubscriptionNames(options.subscriptions);
   let accountId;
   let cloudflareAuthProfile;
   let existingBrain = false;
   let doctorManifest = {};
+  let manifestLoaded = false;
   if (manifestPath && existsSync(manifestPath)) {
     try {
       const manifest = loadManifest(manifestPath).m;
       doctorManifest = manifest;
+      manifestLoaded = true;
       const cloudflare = manifest?.infrastructure?.cloudflare;
       accountId = cloudflare?.account_id;
       cloudflareAuthProfile = cloudflare?.auth_profile;
@@ -23214,6 +23236,26 @@ export async function cmdDoctor(manifestPath, options = {}) {
         accountId,
         onStorageError: printStorageError,
       });
+    }
+  }
+
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  // Keep the existing-Brain checkup short. Explicit labels opt into the guide;
+  // fresh or diagnostic interactive checks may offer the additional prompt.
+  if (options.subscriptions === undefined && interactive && !ownerChecklist) {
+    info("Read subscription names in the exact account at Manage Account > Billing > Subscriptions.");
+    subscriptionNames = parseSubscriptionNames(await (options.askFn ?? ask)(
+      "Cloudflare subscription names, separated by semicolons (leave blank to check later)", "",
+    ));
+  }
+  if (!ownerChecklist || options.subscriptions !== undefined) {
+    console.log("");
+    for (const line of renderSubscriptionSection(subscriptionNames, {
+      r2BucketRequested: manifestLoaded
+        ? Boolean(r2BucketRequested(doctorManifest.infrastructure?.cloudflare)) : null,
+    })) console.log(`  ${line}`);
+    if (!subscriptionNames.length) {
+      info(renderCliCommands('Run brain doctor --subscriptions "<name>;<name>" with the same manifest, if supplied.'));
     }
   }
 
@@ -23641,6 +23683,27 @@ export async function setupWorkerScriptExists(manifestPath, options = {}) {
   return scripts.some((row) => row.id === scriptName);
 }
 
+/** Prove settings against the pinned manifest and direct, same-host health. */
+export async function proveSetupWorkerSettings(manifestPath, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  try {
+    const account = await (options.resolveAccount ?? resolveAccount)(m);
+    const script = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+    const settings = await (options.cf ?? cf)(`/accounts/${account.id}/workers/scripts/${script}/settings`);
+    const health = await readLiveWorkerHealthBody(manifestPath, options);
+    const custom = m.corpora?.custom_api;
+    return proveSetupSettings({
+      settings, health, slug: m.client?.slug || "brain",
+      expectedBindings: workerBindings(m, m.infrastructure.cloudflare),
+      activeSecretNames: custom?.enabled === true ? [custom.token_secret] : [],
+      retainedSecretNames: ["ADMIN_KEY", ...WORKER_PROVIDER_SECRET_NAMES, BANK_ACCESS_WRAPPING_KEY_SECRET],
+    });
+  } catch {
+    die("The existing Worker's settings proof could not confirm this setup. No upload, migration or Worker key change was started. " +
+      "Keep the saved setup file and ask the technician to review the deployed settings and recovery state before retrying.");
+  }
+}
+
 /** Capture the same required pre-migration recovery point used by update. */
 export async function captureSetupD1Bookmark(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
@@ -23958,6 +24021,9 @@ export async function cmdSetup(manifestPath, options = {}) {
   const healthSetup = options.cmdHealth ?? cmdHealth;
   const drainSetup = options.cmdDrain ?? cmdDrain;
   const detectExistingWorker = options.setupWorkerScriptExists ?? setupWorkerScriptExists;
+  const proveExistingSettings = (pinnedPath) => proveSetupWorkerSettings(pinnedPath, {
+    ...(options.setupSettingsProofOptions || {}), domain: existingWorkerProbeDomain,
+  });
   // Pin the post-provision manifest before asking whether its exact Worker
   // exists. The inventory decision, bookmark, paused Worker, migration, and
   // active Worker must all name one immutable account/database/script tuple.
@@ -24013,6 +24079,7 @@ export async function cmdSetup(manifestPath, options = {}) {
             "      and rerunning it here would pause a working one. Nothing was changed."
         );
       }
+      await runPinnedSetupStage("setup existing Worker settings proof", proveExistingSettings);
       ok(`this brain is already installed and live on ${PRODUCT_VERSION}; no cutover, migration or deploy needed`);
     } else if (workerAlreadyExisted && usesD1) {
       // The probe above returns null for an unreachable Worker AND for one that
@@ -24033,6 +24100,7 @@ export async function cmdSetup(manifestPath, options = {}) {
             "      and drain cannot write while the writer is paused.",
         );
       }
+      await runPinnedSetupStage("setup existing Worker settings proof", proveExistingSettings);
       // A resumed setup can encounter a Worker deployed by an older package.
       // Quiesce it with the same compatibility protocol as `brain update`
       // before any new lease columns are applied.
@@ -24129,7 +24197,16 @@ export async function cmdSetup(manifestPath, options = {}) {
   }
   // Even resumed setup reaches this boundary, before keys, health and smoke.
   // A denied old-profile read remains optional and cannot offer token recovery.
-  await saveMissingBrainDomain(target, options.domainSaveOptions || {});
+  const address = await saveMissingBrainDomain(target, { ...options.domainSaveOptions, guidedSetup: true });
+  if (address?.code === ADDRESS_PENDING_CODE) {
+    // Keep provisioned resources and stop before the running claim, secrets
+    // and address-dependent calls. A retry uses the same setup manifest.
+    closePrompts();
+    info(`Your Brain's address is still coming online. Everything done so far is kept. ` +
+      `${ADDRESS_PENDING_CODE}: Run the same setup again in a few minutes: ` +
+      `brain setup ${shownTarget}${skipConnect ? " --no-connect" : ""}`);
+    return address;
+  }
   // Provision and address persistence write resource IDs and the live address.
   // Everything below must use the committed manifest, not setup's old template.
   m = loadManifest(target).m;
@@ -30333,22 +30410,30 @@ export async function prepareCloudflareAccountCeremony(options = {}) {
  * Bind the separate Workers Paid proof to the exact account Cloudflare returned.
  *
  * The narrow browser session cannot read billing. Interactive owners confirm on
- * the account-specific dashboard page. An unattended launcher must carry the
- * same non-secret account id in BRAIN_WORKERS_PAID_ACCOUNT_ID; a generic yes is
- * deliberately insufficient because it could refer to another reachable
- * account.
+ * the account-specific dashboard page. Guided setup can carry the reviewed
+ * flag only with the same supplied account id; unattended launchers can carry
+ * BRAIN_WORKERS_PAID_ACCOUNT_ID. A generic yes cannot bind another account.
  */
 export async function confirmCloudflareWorkersPaidAccount(account, options = {}) {
   const accountId = String(account?.id || "").trim().toLowerCase();
   const accountName = String(account?.name || "").trim();
   if (!/^[a-f0-9]{32}$/.test(accountId) || !accountName || /[\u0000-\u001f\u007f]/.test(accountName)) {
-    die("setup could not bind the Workers Paid check to one verified Cloudflare account. Nothing was created.");
+    die("setup could not bind the Workers Paid check to one verified Cloudflare account. Verify the exact account before continuing.");
   }
 
   const write = options.write ?? ((line) => console.log(line));
   const plansUrl = cloudflareWorkersPlanUrl(accountId);
   write("");
   write(`  Workers Paid check for Cloudflare account \"${accountName}\" (${accountId})`);
+  write(`  ${WORKERS_PAID_SETUP_NOTICE}`);
+  write(`  ${WORKERS_PAID_BUNDLE_WARNING}`);
+  // Match both ids under the same policy as the parsed setup account option.
+  // The flag carries owner consent, never evidence of a billing-status read.
+  const suppliedAccountId = String(options.suppliedAccountId || "").trim().toLowerCase();
+  if (options.workersPaidConfirmed === true && suppliedAccountId === accountId) {
+    write("  The owner's reviewed Workers Paid confirmation matches the exact verified account. Billing status was not read.");
+    return Object.freeze({ account_id: accountId, confirmation: "owner_flag" });
+  }
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (interactive) {
     const opened = (options.openBrowserImpl ?? openBrowser)(plansUrl, options.openBrowserOptions || {});
@@ -30362,13 +30447,14 @@ export async function confirmCloudflareWorkersPaidAccount(account, options = {})
     ).trim().toLowerCase();
     if (confirmedAccountId !== accountId) {
       die(
-        "unattended setup stopped before creating any Cloudflare resource. " +
-          "After the owner confirms Workers & Pages > Plans says Paid for the exact manifest account, " +
-          "the approved launcher may set BRAIN_WORKERS_PAID_ACCOUNT_ID to that account id. " +
+        "Workers Paid confirmation is still needed for the exact verified Cloudflare account. " +
+          "After the owner confirms Workers & Pages > Plans says Paid for that account, " +
+          "rerun the same setup command with --cloudflare-account-id and --workers-paid-confirmed. " +
+          "An approved launcher may instead set BRAIN_WORKERS_PAID_ACCOUNT_ID to that account id. " +
           "A missing or different account id is not approval.",
       );
     }
-    write("  The unattended Workers Paid confirmation matches the exact verified account. No Cloudflare resource has been created yet.");
+    write("  The unattended Workers Paid confirmation matches the exact verified account. Billing status was not read.");
     return Object.freeze({ account_id: accountId, confirmation: "account_bound_automation" });
   }
 
@@ -30379,11 +30465,11 @@ export async function confirmCloudflareWorkersPaidAccount(account, options = {})
   )).trim().toUpperCase();
   if (paid !== "PAID") {
     die(
-      "setup stopped before creating any Cloudflare resource. Confirm the exact account above shows Workers & Pages > Plans > Paid, then rerun the same setup command. " +
+      "setup stopped at the Workers Paid confirmation. Confirm the exact account above shows Workers & Pages > Plans > Paid, then rerun the same setup command. " +
         "Any plan change, payment, or billing approval belongs to the owner in Cloudflare.",
     );
   }
-  write("  Workers Paid confirmed by the owner for the exact verified account. No Cloudflare resource has been created yet.");
+  write("  Workers Paid confirmed by the owner for the exact verified account.");
   return Object.freeze({ account_id: accountId, confirmation: "owner_dashboard" });
 }
 
@@ -30406,7 +30492,8 @@ export async function confirmWorkersPaidForSetup(account, options = {}) {
   const write = options.write ?? ((line) => console.log(line));
   write("");
   write(`  Cloudflare account verified: ${accountName}`);
-  write("  Financial Brain needs the Workers Paid plan, currently about $5 per month, on this exact account.");
+  write(`  ${WORKERS_PAID_SETUP_NOTICE}`);
+  write(`  ${WORKERS_PAID_BUNDLE_WARNING}`);
   write("  Check: Cloudflare dashboard > Workers & Pages > Plans");
   if (options.confirmed === true) {
     write("  The owner's Workers Paid confirmation was supplied for this exact account. No billing setting was changed.");
@@ -30437,6 +30524,13 @@ export async function confirmWorkersPaidForSetup(account, options = {}) {
   write("  Workers Paid confirmed by the owner. No billing setting was changed.");
   write("");
   return Object.freeze({ account_id: accountId, confirmed: true, source: "owner_prompt" });
+}
+
+// Keep the production consent options available to injected control-action tests.
+export function setupWorkersPaidOptions({
+  interactive, askFn, environment, workersPaidConfirmed, suppliedAccountId,
+} = {}) {
+  return { interactive, askFn, environment, workersPaidConfirmed, suppliedAccountId };
 }
 
 export function createSetupControlAction({
@@ -30610,11 +30704,13 @@ async function cmdSetupInteractive(manifestPath) {
     readCurrentManifest: () => existsSync(target) ? loadManifest(target).m : null,
     resolveSavedAccount: current => resolveAccount(current),
     chooseAccount: () => chooseSetupAccount(ask),
-    confirmWorkersPaid: selectedAccount => confirmCloudflareWorkersPaidAccount(selectedAccount, {
+    confirmWorkersPaid: selectedAccount => confirmCloudflareWorkersPaidAccount(selectedAccount, setupWorkersPaidOptions({
         interactive,
         askFn: ask,
         environment: process.env,
-      }),
+        workersPaidConfirmed,
+        suppliedAccountId,
+      })),
     ensureSubdomain: selectedAccount => reserveWorkersDevAddress({
       accountId: selectedAccount.id, request: cf, registrationContext: "setup",
       writeLine: console.log, secrets: [activeCloudflareToken()],
@@ -30843,7 +30939,12 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
       runInstallSmoke: options.runInstallSmoke || (({ manifestPath: smokeManifestPath }) =>
         runPublicInstallSmoke(smokeManifestPath)),
     });
-    console.log(renderTechnicianStepDone(plan.steps.find((candidate) => candidate.id === step), plan.steps));
+    if (receipt.completed === true) {
+      console.log(renderTechnicianStepDone(plan.steps.find((candidate) => candidate.id === step), plan.steps));
+    } else {
+      console.log("Passkey invitation prepared. Enrollment is still pending.");
+      console.log(renderCliCommands(receipt.next_action));
+    }
     return receipt;
   } catch (error) {
     die(String(error?.message || error));
@@ -34293,7 +34394,7 @@ async function dispatchRollback(manifestPath) {
 
 /** Every option `brain doctor` reads. Anything else is a typo or a flag from a
  * release this one is not. */
-const DOCTOR_FLAGS = ["repair", "rollback", "repair-checksum", "diagnostic", "yes"];
+const DOCTOR_FLAGS = ["repair", "rollback", "repair-checksum", "diagnostic", "yes", "subscriptions"];
 
 /**
  * `brain doctor [manifest]` with no flags stays the existing pure preflight.
@@ -34312,6 +34413,10 @@ async function dispatchDoctor(manifestPath) {
   const repairRequested = flags.repair === true;
   const rollbackRequested = flags.rollback === true;
   const repairChecksumRequested = flags["repair-checksum"] === true;
+  if (flags.subscriptions !== undefined && (repairRequested || rollbackRequested || repairChecksumRequested)) {
+    die("--subscriptions belongs to the read-only checkup. Run it separately from a repair or rollback.");
+  }
+  parseSubscriptionNames(flags.subscriptions);
   if ([repairRequested, rollbackRequested, repairChecksumRequested].filter(Boolean).length > 1) {
     die("choose only one of --repair, --rollback, or --repair-checksum");
   }
@@ -34333,7 +34438,7 @@ async function dispatchDoctor(manifestPath) {
       () => cmdDoctorRepair(manifestPath, { action: rollbackRequested ? "rollback" : "repair", confirmed: flags.yes === true }),
     );
   }
-  return cmdDoctor(manifestPath, { diagnostic: flags.diagnostic === true });
+  return cmdDoctor(manifestPath, { diagnostic: flags.diagnostic === true, subscriptions: flags.subscriptions });
 }
 
 /* ------------------------------------------------- brain import bank ----- */
@@ -36500,6 +36605,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain doctor     <manifest> --repair   diagnose a brain stuck mid-upgrade (--yes to resume)
     brain doctor     <manifest> --rollback preview restore to the pre-migration bookmark (--yes performs it)
     brain doctor     <manifest> --repair-checksum  reconcile an applied migration whose file changed (--yes to apply)
+    brain doctor     [manifest] --subscriptions "<name>;<name>"  explain owner-supplied subscription names; no billing access
     brain rollback   <manifest> <bookmark> preview D1-only restore (--yes performs it)
 
   operate

@@ -59,7 +59,26 @@ credentials just to print its version.
 
 ## Workers Paid is the prerequisite that bites
 
-Vectorize now has a Free allowance, but that does not make the Free plan a safe
+Choose Workers Paid for setup. Do not add Images or Stream for the Brain; it
+does not use those services.
+
+Workers Paid has a $5 USD monthly minimum as of 2026-11-24; included usage is
+limited and extra usage or other products can add charges.
+Source: https://developers.cloudflare.com/workers/platform/pricing/
+(page updated 2026-11-18).
+
+To review subscriptions, read their names in the exact account at
+**Manage Account > Billing > Subscriptions**. Run
+`brain doctor <manifest> --subscriptions "<name>;<name>"`. Fresh or diagnostic
+interactive checkups can also ask for the names. The guide explains required
+D1, Vectorize and Workers AI, optional R2, and Images, Stream and logging
+pricing with dated official sources. It cannot verify the account's charges.
+R2 usage follows the manifest's bucket request; enabled logging and unfamiliar
+or combined bundles remain uncertain. Check other projects and product terms
+with your installer before cancelling anything. No billing access is requested
+and no subscription is changed. Billing actions belong to the owner.
+
+Vectorize has a Free allowance as of 2026-11-24, but that does not make the Free plan a safe
 production baseline for this product. At 768 dimensions, its 5 million stored
 vector dimensions hold only about 6,500 chunks. The Free plan also hard-stops at
 100,000 D1 row writes per day and 10 ms of Worker CPU per request. A normal
@@ -73,11 +92,11 @@ product access, but the narrow installer sign-in cannot read billing status, so
 the owner's dashboard confirmation remains the plan proof. Never infer Paid
 from successful Vectorize access.
 
-Current limits:
+Limits checked as of 2026-11-24:
 
 - Vectorize pricing: https://developers.cloudflare.com/vectorize/platform/pricing/
 - D1 pricing: https://developers.cloudflare.com/d1/platform/pricing/
-- Workers limits: https://developers.cloudflare.com/workers/platform/limits/
+- Workers pricing and allowances: https://developers.cloudflare.com/workers/platform/pricing/
 
 ---
 
