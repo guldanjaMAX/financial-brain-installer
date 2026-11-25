@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const suite = 'worker/test/highwrong-frozen-1114.test.mjs';
+const overviewFixturePath = 'worker/test/helpers/money-overview-fixture.mjs';
 const quiet = `while [ -e ${resolve(root, '../../MAC-QUIET')} ]; do sleep 60; done`;
 const helperUrl = import.meta.url;
 const storage = new AsyncLocalStorage();
@@ -45,6 +46,11 @@ if (process.env.CONF_HIDE_REPLAY_OUTPUT) {
     if (!url.startsWith(pathToFileURL(replayRoot + '/').href)) return loaded;
     const path = relative(replayRoot, fileURLToPath(url)).replaceAll('\\', '/');
     let source = typeof loaded.source === 'string' ? loaded.source : loaded.source && new TextDecoder().decode(loaded.source);
+    if (path === overviewFixturePath) {
+      // Replay both readers against the archived fixture bytes. The ordinary
+      // fixture can evolve to use the production Plaid reference shape.
+      source = readFileSync(process.env.CONF_HIDE_REPLAY_OVERVIEW_FIXTURE, 'utf8');
+    }
     if (path === suite) {
       const anchor = "import nodeTest from 'node:test';";
       assert.ok(source.includes(anchor), 'frozen test registration anchor exists');
@@ -113,7 +119,7 @@ export function replayFrozenLevels(t) {
   // Both arms must use the same schema and fixture bytes, except the approved
   // owner-display assertion in the frozen test itself.
   const fixturePaths = new Set(['worker/test/helpers/doc-high-provenance.mjs',
-    'worker/test/helpers/clean-money-fixture.mjs', 'worker/test/helpers/money-overview-fixture.mjs',
+    'worker/test/helpers/clean-money-fixture.mjs',
     'worker/test/product-contract-fixture.mjs']);
   for (const [path, hash] of inventory.filter(([p]) => p.startsWith('migrations/d1/') || fixturePaths.has(p))) {
     assert.equal(createHash('sha256').update(readFileSync(join(root, path))).digest('hex'), hash, `same replay fixture: ${path}`);
@@ -127,7 +133,8 @@ export function replayFrozenLevels(t) {
     const args = ['--import', helperUrl, '--test', '--test-reporter=tap', join(productRoot, suite)];
     const result = spawnSync(process.platform === 'win32' ? process.execPath : 'nice',
       process.platform === 'win32' ? args : ['-n', '10', process.execPath, ...args], {
-      cwd: productRoot, env: { ...env, CONF_HIDE_REPLAY_ROOT: productRoot, CONF_HIDE_REPLAY_OUTPUT: output },
+      cwd: productRoot, env: { ...env, CONF_HIDE_REPLAY_ROOT: productRoot, CONF_HIDE_REPLAY_OUTPUT: output,
+        CONF_HIDE_REPLAY_OVERVIEW_FIXTURE: join(head, overviewFixturePath) },
       // The archived engine can spend over 15 minutes on 483 real SQLite
       // cases when the runner is shared. Keep a finite cap on each arm.
       encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30 * 60 * 1000,

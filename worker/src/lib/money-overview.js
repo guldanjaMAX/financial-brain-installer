@@ -1,8 +1,9 @@
 import { queryMoney } from './money-query.js';
 import { accountKindReviewSql, applyAccountKindReview } from './fin-account-kinds.js';
 import { MONEY_OVERVIEW_NEXT_STEP, unavailableMoneyOverview } from './money-query-contract.js';
-import { confidenceText, unknownMoneyConfidence, limitMoneyConfidence, MONEY_ACCOUNT_HISTORY_SQL, moneyAccountStart } from './money-confidence.js';
+import { confidenceText, unknownMoneyConfidence, limitMoneyConfidence, MONEY_ACCOUNT_HISTORY_SQL, moneyAccountStart, verifiedMoneySyncInstant } from './money-confidence.js';
 import { ownerEvidenceNote, ownerOutputText } from './owner-evidence.js';
+import { ASSIGNED_MONEY_FEED_SQL, ASSIGNED_MONEY_FEED_SYNC_SQL } from './money-feed-assignment.js';
 
 const unavailable = () => Object.assign(new Error('Could not read this part of the money overview.'),
   { code: 'MONEY_OVERVIEW_UNAVAILABLE' });
@@ -32,13 +33,8 @@ function calendar(zone, instant) {
 // cross this boundary. A configured live feed alone does not prove connection.
 const CONNECTION_SQL = `SELECT a.tenant_id,a.account_slug,a.label,a.mask,a.account_kind,a.balance_role,
   a.currency,a.status,a.feed_mode,a.opened_on,a.closed_on,${MONEY_ACCOUNT_HISTORY_SQL} AS history_json,${accountKindReviewSql('a')} AS account_kind_review_json,
-  EXISTS(SELECT 1 FROM (
-    SELECT tenant_id,account_ref,item_ref FROM plaid_account_entity_assignments WHERE entity_slug IS NOT NULL
-    UNION ALL SELECT tenant_id,account_ref,item_ref FROM simplefin_account_assignments WHERE entity_slug IS NOT NULL
-  ) p JOIN bank_feed_items b ON b.tenant_id=p.tenant_id AND b.item_ref=p.item_ref
-    WHERE p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref
-      AND b.status='connected' AND b.removed_at IS NULL AND b.environment='production'
-      AND a.feed_mode='live' AND a.status='open') AS connected
+  EXISTS(SELECT 1 FROM bank_feed_items b WHERE ${ASSIGNED_MONEY_FEED_SQL}) AS connected,
+  ${ASSIGNED_MONEY_FEED_SYNC_SQL} AS last_sync
   FROM fin_accounts a WHERE a.superseded_by_id IS NULL ORDER BY a.tenant_id,a.account_slug LIMIT 1001`;
 
 function overviewSql(from, today) {
@@ -164,7 +160,8 @@ export async function overviewMoney(env, { now = Date.now, timeoutMs = 10000, ..
           kind_review_state: a.account_kind_review?.state || 'unreviewed',
           kind_balance_conflict: Boolean(a.account_kind_balance_conflict), currency: a.currency,
           status: a.status, feed_mode: a.feed_mode, opened_on: a.opened_on, closed_on: a.closed_on, history: JSON.parse(a.history_json),
-          connected: a.connected === 1, coverage_available: false, row_count: null, gaps: null };
+          connected: a.connected === 1, last_sync: verifiedMoneySyncInstant(a.last_sync, instant) === null ? null : a.last_sync,
+          coverage_available: false, row_count: null, gaps: null };
       });
     } finally { clearTimeout(timer); }
   };

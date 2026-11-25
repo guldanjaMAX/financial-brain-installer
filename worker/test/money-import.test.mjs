@@ -17,6 +17,26 @@ const csv = (lines) => readBankExport(`Date,Description,Debit,Credit\n${lines.jo
 const purchase = "2026-10-06,Office supplies,12.00,";
 const refund = "2026-10-05,Refund,,4.00";
 
+test("statement import remains a manual account in both money tools", async t => {
+  const f = await createProductFixture();
+  t.after(() => f.close());
+  assert.equal((await importBankExport(f.env, csv([purchase]), importOptions)).imported, true);
+  const { overviewMoney } = await import("../src/lib/money-overview.js");
+  const { queryMoney } = await import("../src/lib/money-query.js");
+  const options = { now: () => Date.parse(NOW) };
+  const overview = await overviewMoney(f.env, options);
+  assert.equal(overview.accounts.length, 1);
+  assert.equal(overview.accounts[0].feed_mode, "manual");
+  assert.equal(overview.accounts[0].connected, false);
+  assert.equal(overview.accounts[0].last_sync, null);
+  const result = await queryMoney(f.env, {
+    sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE posted_on BETWEEN '2026-10-06' AND '2026-10-06'",
+    from: "2026-10-06", through: "2026-10-06",
+  }, options);
+  assert.equal(result.rows[0].figure, 1200);
+  assert.match(result.confidence_text, /An exact completed feed sync time is unavailable/);
+});
+
 async function legacyFixture() {
   const f = await createProductFixture();
   await importBankExport(f.env, csv([purchase, purchase, refund]), importOptions);

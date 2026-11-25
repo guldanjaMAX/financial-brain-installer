@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { test } from "node:test";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-cli-success-exit-")));
@@ -71,6 +72,18 @@ function runArm(mode, extraEnv = {}) {
       resolve({ mode, code, signal, stdout, stderr, timedOut });
     });
   });
+}
+
+function assertNoUpdateCompletion(arm) {
+  const restartInstructions = /(?:One last step: quit Claude Code|In Claude Code type \/exit|Then ask: check my Brain\.)/u;
+  // Streams have independent line boundaries, and a prefix must not hide a
+  // completion claim after a failed update.
+  for (const stream of ["stdout", "stderr"]) {
+    assert.doesNotMatch(arm[stream], /Done\. Your Brain is now on version /u,
+      `${arm.mode} printed Done on ${stream} after failure`);
+    assert.doesNotMatch(arm[stream], restartInstructions,
+      `${arm.mode} printed restart instructions on ${stream} after failure`);
+  }
 }
 
 try {
@@ -143,7 +156,70 @@ try {
   assert.match(failed.stdout, /DECISION daily recovery=true enabled=false upgrades=1 restore_attempts=[1-9]/);
   assert.match(failed.stdout + failed.stderr, /this update is incomplete: daily imports remain paused or unverified/);
   assert.match(failed.stdout + failed.stderr, /Daily recovery receipt:/);
-  assert.doesNotMatch(failed.stdout, /^✔ Version /mu);
+  assert.doesNotMatch(failed.stdout, /✔ Version /u);
+
+  const checkFailure = await runArm("update-required-check-failure");
+  const version = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+  const done = `Done. Your Brain is now on version ${version} and passed its checks.`;
+  const cleanLines = commandArms[0].stdout.split(/\r?\n/u);
+  const assertCompleted = lines => {
+    assert.equal(lines.filter(line => line === done).length, 1);
+    return lines.indexOf(done);
+  };
+  await test("clean update prints Done once after its checks", () => {
+    const check = cleanLines.findIndex(line => line.includes("Brain is online"));
+    assert.ok(check >= 0);
+    assert.ok(assertCompleted(cleanLines) > check);
+  });
+  await test("source attention lines are unchanged and precede Done", () => {
+    const lines = commandArms[1].stdout.split(/\r?\n/u);
+    const sources = [
+      "Google Drive could not finish updating. Ask your installer to check it.",
+      "Gmail could not finish updating. Ask your installer to check it.",
+    ];
+    assert.deepEqual(lines.filter(line => sources.includes(line)), sources);
+    assert.ok(assertCompleted(lines) > lines.indexOf(sources[1]));
+  });
+  // The clean control rules out an implementation that never reports completion.
+  await test("daily recovery failure exits 1 without Done or restart instructions", () => {
+    assert.equal(failed.code, 1);
+    assertNoUpdateCompletion(failed);
+    assertCompleted(cleanLines);
+  });
+  await test("failed version verification exits 1 without Done or restart instructions", () => {
+    assert.equal(checkFailure.timedOut, false);
+    assert.equal(checkFailure.code, 1);
+    const output = checkFailure.stdout + checkFailure.stderr;
+    assert.match(output, /fixture exact-version verification failed/);
+    assertNoUpdateCompletion(checkFailure);
+    assertCompleted(cleanLines);
+  });
+  for (const arm of [failed, checkFailure]) {
+    await test(`${arm.mode} rejects stderr Done after partial stdout`, () => {
+      assertNoUpdateCompletion(arm);
+      const mutant = { ...arm, stdout: `${arm.stdout}partial stdout`, stderr: `${done}\n${arm.stderr}` };
+      assert.ok(mutant.stdout.endsWith("partial stdout"));
+      assert.equal(mutant.stderr.split(/\r?\n/u)[0], done);
+      assert.throws(() => assertNoUpdateCompletion(mutant), {
+        code: "ERR_ASSERTION", message: `${arm.mode} printed Done on stderr after failure`,
+      });
+    });
+    await test(`${arm.mode} rejects Done hidden in stdout's last line`, () => {
+      assertNoUpdateCompletion(arm);
+      const mutant = { ...arm, stdout: `${arm.stdout}\npartial stdout✔ ${done}` };
+      assert.equal(mutant.stdout.split(/\r?\n/u).at(-1), `partial stdout✔ ${done}`);
+      assert.throws(() => assertNoUpdateCompletion(mutant), {
+        code: "ERR_ASSERTION", message: `${arm.mode} printed Done on stdout after failure`,
+      });
+    });
+  }
+  await test("normal update prints the restart instructions once after Done", () => {
+    const restart = "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.";
+    assert.equal(cleanLines.filter(line => line === restart).length, 1);
+    assert.ok(cleanLines.indexOf(restart) > assertCompleted(cleanLines));
+    assert.equal(cleanLines[cleanLines.indexOf(restart) + 1], "In Claude Code type /exit, then claude --continue.");
+    assert.equal(cleanLines[cleanLines.indexOf(restart) + 2], "Then ask: check my Brain.");
+  });
 
   assert.notEqual(
     control.stdout.includes("opened=true"),

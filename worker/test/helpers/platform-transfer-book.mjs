@@ -26,7 +26,7 @@ export function book({ accounts, rows, at = '2026-11-01T12:00:00Z', coverage = [
     const cov = a.coverage === undefined ? coverage : a.coverage;
     if ((a.mode || 'manual') === 'live' && a.connect !== false) {
       const ref = 'acct_' + createHash('sha256').update(a.slug).digest('hex').slice(0, 32);
-      run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?', ref, a.slug);
+      run('UPDATE fin_accounts SET external_ref=?,source_feed=? WHERE account_slug=?', 'synthetic', 'bank-feed:' + a.slug, a.slug);
       run(`INSERT INTO bank_feed_items(item_ref,access_ciphertext,access_iv,environment,status,status_detail,connected_at,removed_at,last_synced_at)
         VALUES (?,?,?,'production','connected','Synthetic status',?,NULL,?)`, a.slug, Buffer.from('synthetic storage bytes').toString('base64'), Buffer.from('synthetic iv').toString('base64'), at, at);
       run(`INSERT INTO plaid_account_entity_assignments(item_ref,provider_account_id,account_ref,entity_slug,discovered_at,last_seen_at,assigned_at,updated_at)

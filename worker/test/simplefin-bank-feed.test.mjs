@@ -364,6 +364,28 @@ async function reviewPull(t) {
   return { fixture, state, pull, assign, now, status: () => simpleFinFeedStatus(fixture.env, { now: now() }) };
 }
 
+test("promoted SimpleFIN account has verified connection evidence in both money tools", async t => {
+  const { fixture, pull, assign, now } = await reviewPull(t);
+  assert.equal((await pull()).partial, false);
+  await assign();
+  const ledger = fixture.first("SELECT external_ref FROM fin_accounts");
+  assert.equal(ledger.external_ref, fixture.first("SELECT account_ref FROM simplefin_account_assignments").account_ref);
+  assert.equal(fixture.first("SELECT last_synced_at FROM bank_feed_items").last_synced_at, now());
+  const { overviewMoney } = await import("../src/lib/money-overview.js");
+  const { queryMoney } = await import("../src/lib/money-query.js");
+  const options = { now: () => Date.parse(now()) };
+  const overview = await overviewMoney(fixture.env, options);
+  assert.equal(overview.accounts.length, 1);
+  assert.equal(overview.accounts[0].connected, true);
+  const result = await queryMoney(fixture.env, {
+    sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE posted_on BETWEEN '2026-09-20' AND '2026-09-20'",
+    from: "2026-09-20", through: "2026-09-20",
+  }, options);
+  assert.equal(result.rows[0].figure, 12376);
+  for (const answer of [overview, result])
+    assert.doesNotMatch(answer.confidence_text, /not connected|no verified successful sync time|discovered feed accounts/);
+});
+
 for (const [currency, balance, amount, currentMinor, availableMinor] of generatedRows([
   ["USD", "123.47", "0.29", 12347, 29], ["JPY", "123", "29", 123, 29],
   ...["KRW", "CLP", "VND"].map(code => [code, "123", "29", 123, 29]),

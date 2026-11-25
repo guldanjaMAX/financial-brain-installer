@@ -36,7 +36,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.34, schema70.** Publication, supported
+**Package identity: brain-installer 0.4.35, schema70.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -50,7 +50,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, zero 0.4.34 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, zero 0.4.35 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking

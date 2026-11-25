@@ -34151,12 +34151,6 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     : attention;
   const sessionFolderLabel = ownerSessionFolderLabel(pin.target, options);
   const brainFolderWarning = ownerBrainFolderWarning(pin.target, options);
-  if (options.reportUpdateGuidance) {
-    const restart = sessionFolderLabel
-      ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: ${(options.platformName ?? options.platform ?? process.platform) === "win32" ? `Set-Location -LiteralPath ${quotePowerShellArgument(dirname(pin.target))} -ErrorAction Stop; claude` : `cd ${quotePosixArgument(dirname(pin.target))} && claude`}. For Codex, open that same folder. The answer rules load there.`
-      : "In Claude Code type /exit, then claude --continue.";
-    safelyReportUpdateResult(options.reportUpdateGuidance, restart);
-  }
   const closing = ownerUpdateRows({
     version: PRODUCT_VERSION,
     acceptance,
@@ -34173,6 +34167,43 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   }).join("\n");
   safelyReportUpdateResult(options.reportUpdateFinish ?? printOwnerChecklist, closing);
   safelyReportUpdateResult(options.reportUpdateSchedulers ?? (() => {}), schedulerResults);
+  let restartCommand;
+  if (sessionFolderLabel) {
+    const brainFolder = dirname(pin.target);
+    const windowsShell = (options.platformName ?? options.platform ?? process.platform) === "win32";
+    try {
+      restartCommand = windowsShell
+        ? `Set-Location -LiteralPath ${quotePowerShellArgument(brainFolder)} -ErrorAction Stop; claude`
+        : `cd ${quotePosixArgument(brainFolder)} && claude`;
+    } catch {
+      // A verified folder may contain characters the shell display rejects.
+      // Keep the path out of the restart block and give manual navigation steps.
+    }
+  }
+  const restart = [
+    "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
+    sessionFolderLabel
+      ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: ${restartCommand ?? "claude"}. For Codex, open that same folder. The answer rules load there.`
+      : "In Claude Code type /exit, then claude --continue.",
+    "Then ask: check my Brain.",
+    ...(!brainFolderWarning && restartCommand && sessionFolderLabel !== "another folder" ? [
+      `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
+    ] : []),
+  ].join("\n");
+  // The lifecycle lock and private outcome receipt can still fail after this
+  // point. Publish the completion marker only after the outer command's cleanup.
+  failureState.reportCompletion = () => {
+    if (selfcheckReport?.status === "not_checked") {
+      safelyReportUpdateResult(printOwnerChecklist,
+        `Your Brain is now on version ${PRODUCT_VERSION}.\n${updateSelfcheckMessage(selfcheckReport)}`);
+    } else if ((!selfcheckReport || selfcheckReport.status === "passed") &&
+        (!acceptance || acceptance.passed === true) &&
+        (!reconcileOwnerAgents || ownerAgentRefreshResult?.status === "ready")) {
+      safelyReportUpdateResult(printOwnerChecklist,
+        `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`);
+    }
+    safelyReportUpdateResult(options.reportUpdateGuidance ?? printOwnerChecklist, restart);
+  };
   return upgradeResult;
 }
 
@@ -34243,6 +34274,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
       throw error;
     }
   } catch (error) {
+    failureState.reportCompletion = null;
     if (error.scheduler_results) {
       safelyReportUpdateResult(options.reportUpdateSchedulers ?? (() => {}), error.scheduler_results);
     }
@@ -34263,6 +34295,10 @@ export async function cmdUpdate(manifestPath, options = {}) {
   } finally {
     closePrompts();
     writePrivateUpdateOutcome(process.env, failureState.remote);
+    // A private package's parent still has its own scheduler checks to finish.
+    if (!process.exitCode && process.env[PRIVATE_UPDATE_OUTCOME_ENV] === undefined) {
+      failureState.reportCompletion?.();
+    }
   }
 }
 

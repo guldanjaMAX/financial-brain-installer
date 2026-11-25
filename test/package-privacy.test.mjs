@@ -1124,6 +1124,7 @@ const expected = [
   "worker/src/lib/money-query-confidence.js",
   "worker/src/lib/money-query-overlap.js",
   "worker/src/lib/money-confidence.js",
+  "worker/src/lib/money-feed-assignment.js",
   "worker/src/lib/money-overview.js",
   "worker/src/lib/money-tools/_expected-income-helpers.js",
   "worker/src/lib/money-tools/expected_income.js",

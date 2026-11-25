@@ -1,3 +1,6 @@
+import { DISCOVERED_LEDGER_REFERENCE_SQL, MONEY_FEED_ASSIGNMENTS_SQL } from './money-feed-assignment.js';
+import { verifiedMoneySyncInstant } from './money-confidence.js';
+
 // Operational freshness is independent of webhook delivery and document writes.
 // Never copy provider payloads, credentials, or raw error text into this record.
 export const BANK_SYNC_SECONDS = 86400;
@@ -36,9 +39,8 @@ export function bankErrorStatement(env, tenantId, itemRef, stamp, code) {
     .bind(tenantId,itemRef,stamp,error.code,error.meaning);
 }
 
-export async function bankHealthRows(env, {read=null,includeRetained=false}={}) {
-  const tenantId=String(env.BANK_FEED_TENANT || 'primary');
-  const sql=`SELECT i.item_ref,i.status,i.connected_at,i.removed_at,h.item_ref AS health_item_ref,h.last_attempt_at,h.last_successful_sync_at,
+function bankHealthSql(includeRetained) {
+  return `SELECT i.item_ref,i.status,i.connected_at,i.removed_at,h.item_ref AS health_item_ref,h.last_attempt_at,h.last_successful_sync_at,
     h.data_through,COALESCE(h.last_webhook_at,(SELECT MAX(w.received_at) FROM plaid_webhook_events w
       WHERE w.tenant_id=i.tenant_id AND w.item_ref=i.item_ref)) AS last_webhook_at,
     CASE WHEN r.last_error_code='BANK_ACCESS_REFERENCE_UNREADABLE' THEN r.last_error_code ELSE h.last_error_code END AS last_error_code,
@@ -51,6 +53,11 @@ export async function bankHealthRows(env, {read=null,includeRetained=false}={}) 
     WHERE i.tenant_id=? AND (i.removed_at IS NULL${includeRetained ? ` OR EXISTS (
       SELECT 1 FROM fin_accounts a WHERE a.tenant_id=i.tenant_id AND a.superseded_by_id IS NULL
         AND a.source_feed='bank-feed:'||i.item_ref)` : ''}) ORDER BY i.item_ref`;
+}
+
+export async function bankHealthRows(env, {read=null,includeRetained=false}={}) {
+  const tenantId=String(env.BANK_FEED_TENANT || 'primary');
+  const sql=bankHealthSql(includeRetained);
   return read ? read(sql,[tenantId]) : (await env.DB.prepare(sql).bind(tenantId).all()).results;
 }
 export function bankConnectionHealth(row, now) {
@@ -122,26 +129,50 @@ export async function reconcileBankFeedHealth(env, now) {
 
 // These are trusted, credential-free projections, never caller SQL authority.
 export async function moneyBankFreshness(env, {read,periodEnd,now,scope=null,ownerDay}) {
-  const rows=await bankHealthRows(env,{read,includeRetained:true});
-  if (!rows.length) return [];
-  if (!periodEnd) return [{reason:'The asked period and owner calendar could not be verified.',
-    missing:'Provide period_end for the asked period or configure the owner time zone.'}];
   const tenantId=String(env.BANK_FEED_TENANT||'primary');
-  const accounts=rows.length ? await read(`SELECT a.tenant_id,a.account_slug,a.mask,a.currency,a.source_feed,p.item_ref
-    FROM fin_accounts a LEFT JOIN (
-      SELECT tenant_id,account_ref,item_ref FROM plaid_account_entity_assignments
-      UNION SELECT tenant_id,account_ref,item_ref FROM simplefin_account_assignments
-    ) p ON p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref
-    WHERE a.tenant_id=? AND a.superseded_by_id IS NULL`,[tenantId]) : [];
-  const selected=accounts.filter(account=>(!scope?.accountSlugs || scope.accountSlugs.includes(account.account_slug)) && Object.entries(scope?.filters || {}).every(([field,value])=>
-    !['tenant_id','account_slug','currency'].includes(field) || account[field]===value));
-  const narrowed=Array.isArray(scope?.accountSlugs) || Object.keys(scope?.filters || {}).some(field=>['tenant_id','account_slug','currency'].includes(field));
+  // Read both projections together so an empty Item inventory can still
+  // disclose unresolved ledger sources from the same database snapshot.
+  const evidence=await read(`WITH item_health AS (${bankHealthSql(true)})
+    SELECT h.*,NULL AS ledger_account FROM item_health h
+    UNION ALL
+    SELECT h.*,json_object('tenant_id',a.tenant_id,'account_slug',a.account_slug,'mask',a.mask,
+      'source_feed',a.source_feed,'item_ref',p.item_ref) AS ledger_account
+    FROM fin_accounts a LEFT JOIN item_health h ON 0
+    LEFT JOIN (${MONEY_FEED_ASSIGNMENTS_SQL}) p
+      ON p.tenant_id=a.tenant_id AND ${DISCOVERED_LEDGER_REFERENCE_SQL}
+    WHERE a.tenant_id=? AND a.superseded_by_id IS NULL
+      AND (a.source_feed GLOB 'bank-feed:*'
+        OR (a.source_feed IS NULL AND a.feed_mode='live' AND p.item_ref IS NOT NULL))`,[tenantId,tenantId]);
+  const rows=[];
+  const accounts=[];
+  for (const row of evidence) {
+    if (row.ledger_account === null) rows.push(row);
+    else accounts.push(JSON.parse(row.ledger_account));
+  }
+  // Posting predicates cannot exclude an account from a freshness warning.
+  const accountFilters=Object.entries(scope?.filters || {}).filter(([field])=>['tenant_id','account_slug'].includes(field));
+  const selected=accounts.filter(account=>(!scope?.accountSlugs || scope.accountSlugs.includes(account.account_slug)) &&
+    accountFilters.every(([field,value])=>account[field]===value));
+  const narrowed=Array.isArray(scope?.accountSlugs) || accountFilters.length>0;
+  const label=account=>/^\d{4}$/.test(account.mask||'') ? `the account ending ${account.mask}` : 'a selected bank-fed account';
   const gaps=[];
+  for (const account of selected) {
+    if (account.item_ref == null) gaps.push({
+      reason:`Bank freshness is unknown for ${label(account)} because its bank feed assignment could not be verified.`,
+      missing:'Verify the account assignment and confirm bank activity through the asked period.',
+    });
+  }
+  if (!periodEnd && rows.length) return [...gaps,{reason:'The asked period and owner calendar could not be verified.',
+    missing:'Provide period_end for the asked period or configure the owner time zone.'}];
+  const instant=new Date(now).getTime();
   for (const row of rows) {
-    const connected=selected.filter(account=>account.item_ref===row.item_ref || account.source_feed===`bank-feed:${row.item_ref}`);
-    if (narrowed && !connected.length) continue;
-    const health=bankConnectionHealth(row,now);
-    const observedDay=ownerDay?.(row.last_successful_sync_at);
+    // The ledger's saved Item can identify a gap even when the account has
+    // no verified assignment. This read contributes only negative evidence.
+    const affected=selected.filter(account=>account.item_ref===row.item_ref ||
+      account.source_feed===`bank-feed:${row.item_ref}`);
+    if (narrowed && !affected.length) continue;
+    const sync=verifiedMoneySyncInstant(row.last_successful_sync_at,instant);
+    const observedDay=sync === null ? null : ownerDay?.(row.last_successful_sync_at);
     if (!observedDay) {
       gaps.push({reason:'The bank observation date in the owner calendar could not be verified.',
         missing:'A successful bank sync and a configured owner time zone.'});
@@ -149,9 +180,10 @@ export async function moneyBankFreshness(env, {read,periodEnd,now,scope=null,own
     }
     // Provider window dates cannot prove the unobserved remainder of an owner day.
     const through=row.data_through ? [observedDay,row.data_through].sort()[0] : null;
-    const unobservedTime=periodEnd>=observedDay && Date.parse(row.last_successful_sync_at)<new Date(now).getTime();
+    const unobservedTime=periodEnd>=observedDay && sync<instant;
     if (through && through>=periodEnd && !unobservedTime) continue;
-    const labels=connected.length ? connected.map(account=> /^\d{4}$/.test(account.mask||'') ? `the account ending ${account.mask}` : 'a connected account') : ['a connected bank'];
+    const health=bankConnectionHealth(row,now);
+    const labels=affected.length ? affected.map(label) : ['a connected bank'];
     for (const account of labels) gaps.push({reason:through
       ? `No bank data after ${through} for ${account}.${row.removed_at ? ' This bank connection is disconnected.' : ''}` : `No complete bank sync recorded for ${account}.`,
       missing:`Bank activity after the last successful observation at ${row.last_successful_sync_at} through ${periodEnd}${unobservedTime ? ` (asked as of ${new Date(now).toISOString()})` : ''}. ${row.removed_at ? 'Reconnect this bank to check later activity; saved history remains available.' : health.action}`});

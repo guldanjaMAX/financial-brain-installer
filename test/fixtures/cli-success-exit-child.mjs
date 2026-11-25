@@ -17,6 +17,7 @@ import {
 const mode = process.argv[2];
 const dailyMode = mode.startsWith("update-daily-");
 const dailyRecoveryFailure = mode === "update-daily-recovery-failure";
+const requiredCheckFailure = mode === "update-required-check-failure";
 const root = process.env.HOME;
 if (!root) throw new Error("the fixture requires an isolated HOME");
 mkdirSync(root, { recursive: true });
@@ -59,22 +60,35 @@ if (mode === "control") {
   openPromptsForTesting();
   if (!promptsOpenForTesting()) throw new Error("the readline decision point was not reached");
 
-  if (mode === "update" || mode === "update-warning" || dailyMode) {
+  if (mode === "update" || mode === "update-warning" || requiredCheckFailure || dailyMode) {
     let upgrades = 0;
     let restoreAttempts = 0;
     const updateOptions = {
       platform: process.env.CLI_EXIT_FIXTURE_PLATFORM || process.platform,
+      sessionFolder: root,
       discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
       adoptCloudflareAuthProfile: async () => {},
       withCloudflareControl: async (action) => action(),
       cmdVerify: async () => {},
-      cmdUpgrade: async () => {
+      cmdUpgrade: async (_path, { onOwnerAcceptance }) => {
         upgrades++;
+        if (requiredCheckFailure) throw new Error("fixture exact-version verification failed");
+        if (mode === "update" || mode === "update-warning") {
+          onOwnerAcceptance({
+            passed: true,
+            results: [{ name: "health responds", status: "pass" }],
+            sources: mode === "update-warning" ? [
+              { kind: "drive", state: "stale" },
+              { kind: "gmail", state: "stale" },
+            ] : [],
+          });
+        }
         return {
           status: "verified",
           daily_final_state: { active: true, query_ready: true, pending: 0 },
         };
       },
+      resolveUpdateAgentBaseUrl: async () => "https://fixture.invalid",
       reconcileExistingOwnerAgents: null,
       writeClaudeWorkspaceGuideAfterUpdate: null,
       installTechnicianSkills: () => {
@@ -196,6 +210,8 @@ if (mode === "control") {
       }
       console.log(`DECISION daily recovery=${Boolean(recovery)} enabled=${dailyState.enabled} upgrades=${upgrades} restore_attempts=${restoreAttempts}`);
       if (bridge) console.log(`DECISION bridge enabled=${bridge.enabled} pauses=${bridgePauses}`);
+    } else if (requiredCheckFailure) {
+      await dispatchUpdateCli([manifestPath], { updateOptions });
     } else {
       await cmdUpdate(manifestPath, updateOptions);
     }

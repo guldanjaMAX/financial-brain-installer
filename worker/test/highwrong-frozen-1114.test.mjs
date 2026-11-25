@@ -1679,7 +1679,7 @@ function book({ businessName = 'business', householdName = 'household' } = {}) {
   // ciphertext-shaped placeholder, a Plaid assignment and a fresh successful sync.
   function connection(slug, entity = 'business', syncedAt = '2026-11-14T17:00:00Z') {
     const ref = 'acct_' + Buffer.from(slug).toString('hex').padEnd(32, '0').slice(0, 32);
-    run('UPDATE fin_accounts SET external_ref=?,feed_mode=? WHERE account_slug=?', ref, 'live', slug);
+    run('UPDATE fin_accounts SET external_ref=?,feed_mode=?,source_feed=? WHERE account_slug=?', ref, 'live', 'bank-feed:' + slug, slug);
     run(`INSERT INTO bank_feed_items(item_ref,access_ciphertext,access_iv,environment,status,status_detail,connected_at,removed_at,last_synced_at)
       VALUES (?,?,?,'production','connected','Synthetic status',?,NULL,?)`, slug, Buffer.from('synthetic storage bytes').toString('base64'),
     Buffer.from('synthetic iv').toString('base64'), at, syncedAt);

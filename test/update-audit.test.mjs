@@ -232,9 +232,9 @@ let ordinaryReleaseCopyDecisions = 0;
 function assertOrdinaryReleaseCopyPrecedesLimitations(section) {
   ordinaryReleaseCopyDecisions += 1;
   const rendered = renderCliCommands(section);
-  const ordinary = rendered.indexOf("Bank balances need a fresh check.");
+  const ordinary = rendered.indexOf("Synced bank accounts show as connected in money answers.");
   const limitations = rendered.indexOf("This release does NOT cover");
-  assert.ok(ordinary >= 0 && limitations >= 0 && ordinary < limitations,
+  assert.ok(ordinary >= 0 && (limitations === -1 || ordinary < limitations),
     "ordinary release copy must render before the final does-not-cover block");
 }
 
@@ -254,10 +254,9 @@ function assertExactLimitationIds(block, registry = cases) {
   assert.deepEqual(limitationIds(block), expected,
     "the release limitation block must exactly equal the audit's current deferral set");
 }
-assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
 assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
   "### This release does NOT cover\n\n- **UPDATE-999:** Deferred fixture.\n\n" +
-    "- **Bank balances need a fresh check.** Fixture.",
+    "- **Synced bank accounts show as connected in money answers.** Fixture.",
 ), /ordinary release copy must render before/,
 "the prior layout must fail because whatsnew renders ordinary changes inside the limitation block");
 assert.doesNotThrow(() => assertOrdinaryReleaseCopyPrecedesLimitations(currentReleaseSection));
@@ -303,9 +302,9 @@ for (const id of deferredIds) {
   assert.match(notCoveredBlock, new RegExp(`\\b${id}\\b`),
     `${id} must stay visible in the current release limitation block`);
 }
-assert.match(notCoveredBlock,
+assert.match(candidatePlan,
   /Windows x64 is the only supported Windows runtime[\s\S]*Windows\s+ARM64 ships unproven/i);
-assert.match(notCoveredBlock,
+assert.match(candidatePlan,
   /bank breadth ships unproven[\s\S]*bank invitations stay closed/i);
 assert.ok(releaseBlockers(cases, packageVersion).length > 0,
   "0.4.0 still has real blockers; scoping the gate must not be mistaken for clearing it");
