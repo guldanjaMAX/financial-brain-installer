@@ -12,6 +12,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // 172-command chain and order. Add to this list when you add a test; never
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
+  "node --test test/owner-menu-command-1121.test.mjs",
   "node --test test/owner-menu-basics-0434.test.mjs",
   "node --test test/practice-export-version-0434.test.mjs",
   "node --test test/practice-time-contract-0434.test.mjs",
@@ -623,6 +624,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
+  "node --test test/owner-menu-command-1121.test.mjs",
   "node --test test/owner-menu-basics-0434.test.mjs",
   "node --test test/practice-export-version-0434.test.mjs",
   "node --test test/practice-time-contract-0434.test.mjs",

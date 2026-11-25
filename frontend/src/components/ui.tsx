@@ -22,8 +22,8 @@ export function agoISO(iso: string | null | undefined): string | null {
   return Number.isFinite(ms) ? ago(ms) : null;
 }
 
-export function Section({ title, blurb, children, action, headerInCard = false }: {
-  title: string; blurb?: string; children: ReactNode; action?: ReactNode; headerInCard?: boolean;
+export function Section({ title, blurb, children, action, headerInCard = false, id }: {
+  title: string; blurb?: string; children: ReactNode; action?: ReactNode; headerInCard?: boolean; id?: string;
 }) {
   const heading = <>
     <div className={headerInCard
@@ -35,7 +35,7 @@ export function Section({ title, blurb, children, action, headerInCard = false }
     {blurb && <p className="mt-1 max-w-[42rem] text-[14px] text-ink-soft leading-relaxed">{blurb}</p>}
   </>;
   return (
-    <section className="mt-8 first:mt-0">
+    <section id={id} className="mt-8 first:mt-0 scroll-mt-20">
       {!headerInCard && heading}
       <div className="mt-3 bg-card border border-line rounded-2xl overflow-hidden">
         {headerInCard && <header className="border-b border-line p-4 sm:p-5">{heading}</header>}
@@ -157,12 +157,13 @@ export function TruthNote({ children }: { children: ReactNode }) {
  *  also makes the honest, specific warning this app owes an owner ("this also
  *  disconnects every AI") look like a browser error. Asking inline keeps the
  *  question next to the thing it is about. */
-export function Confirm({ label, question, onConfirm, disabled, tone = "danger" }: {
+export function Confirm({ label, question, onConfirm, disabled, tone = "danger", triggerClassName }: {
   label: string;
   question: string;
   onConfirm: () => void;
   disabled?: boolean;
   tone?: "danger" | "quiet";
+  triggerClassName?: string;
 }) {
   const [asking, setAsking] = useState(false);
   const color = tone === "danger" ? "text-bad" : "text-ink-soft";
@@ -172,7 +173,7 @@ export function Confirm({ label, question, onConfirm, disabled, tone = "danger" 
       <button
         disabled={disabled}
         onClick={() => setAsking(true)}
-        className={`text-[15px] font-semibold min-h-11 ${color} -mx-2 px-2 py-1 rounded-lg hover:bg-paper disabled:opacity-50 shrink-0`}
+        className={`${triggerClassName ?? `text-[15px] font-semibold min-h-11 ${color} -mx-2 px-2 py-1 rounded-lg hover:bg-paper shrink-0`} disabled:opacity-50`}
       >
         {label}
       </button>

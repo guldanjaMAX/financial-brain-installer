@@ -307,6 +307,7 @@ export const visualFixtureServer = createServer(async (request, response) => {
     return sendJson(response, {
       signed_in: true, owner: "Owner", brain: "Financial Brain",
       principal: { kind: "owner", grant_id: null },
+      bank_configured: true,
       devices: [{ credential_id: "device", nickname: rehearsalState.deviceNicknames.get(scenario) || "Primary device", created_at: Date.now() - 86400000 * 20, last_used_at: Date.now() - 60000 }],
       connections: rehearsalState.disconnectedConnections.has(scenario)
         ? []

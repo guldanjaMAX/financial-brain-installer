@@ -343,6 +343,8 @@ export type Me = {
   workspace?: WorkspaceAllowlist;
   devices?: Device[];
   connections?: Connection[];
+  bank_configured?: boolean;
+  support?: { contact_url: string };
 };
 
 export type GrantedDocument = {

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { ApiError, OWNER_SIGNED_OUT_EVENT, api, type Me } from "./lib/api";
 import { Gate, type EnrollmentKind } from "./components/Gate";
 import { Ask, ScopedAsk } from "./components/Ask";
 import { Settings } from "./components/Settings";
+import { SignOutConfirm } from "./components/SignOutConfirm";
 import { Home } from "./components/Home";
 import { Documents } from "./components/Documents";
 import { ThisYear } from "./components/ThisYear";
@@ -214,10 +215,15 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh, notice }: {
     entities.some((entity) => !entity.counterparty),
   );
   const guardedTitle = view === "year" ? "This Year" : "Add & Review";
+  useEffect(() => {
+    if (view === "access" && location.hash === "#banks") {
+      document.getElementById("banks")?.scrollIntoView();
+    }
+  }, [view]);
 
   return (
     <div className="min-h-dvh">
-      <OwnerHeader owner={owner} now={view} go={setView} />
+      <OwnerHeader owner={owner} now={view} go={setView} bankConfigured={me.bank_configured} supportContact={me.support?.contact_url} />
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-7 sm:py-9 pb-24">
         {view === "home" && notice && (
           <p role="status" className="mb-6 max-w-2xl rounded-xl border border-good-line bg-good-bg px-4 py-3 text-sm leading-relaxed text-good">{notice}</p>
@@ -259,16 +265,37 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh, notice }: {
   );
 }
 
-export function OwnerHeader({ owner, now, go }: {
+const OWNER_NAV_ITEM = "w-full px-3 py-2 rounded-lg whitespace-nowrap text-left lg:w-auto lg:text-center";
+const INACTIVE_NAV_ITEM = "text-ink-soft hover:bg-paper hover:text-ink";
+
+export function OwnerHeader({ owner, now, go, bankConfigured, supportContact }: {
   owner: string;
   now: View;
   go: (view: View) => void;
+  bankConfigured?: boolean;
+  supportContact?: string;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
   const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
-  const navigate = (view: View) => {
+  const closeMenu = () => {
+    if (menuOpen && menuButton.current?.getClientRects().length) menuButton.current.focus();
     setMenuOpen(false);
+    setHelpOpen(false);
+  };
+  const navigate = (view: View) => {
+    closeMenu();
     go(view);
+  };
+  const followBanks = (event: MouseEvent<HTMLAnchorElement>) => {
+    closeMenu();
+    // A same-document fragment link does not reload SPA state after an in-app tab change.
+    if (bankConfigured === false && event.currentTarget.search === location.search &&
+        event.currentTarget.pathname === location.pathname &&
+        !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      go("access");
+    }
   };
 
   return (
@@ -283,33 +310,21 @@ export function OwnerHeader({ owner, now, go }: {
             <span className="w-7 h-7 rounded-lg bg-ink text-white grid place-items-center text-[12px] font-semibold shrink-0" aria-hidden="true">FB</span>
             <span className="truncate">{possessive} brain</span>
           </button>
-          <div className="flex items-center gap-1.5 shrink-0 lg:hidden">
-            <button
-              type="button"
-              onClick={() => navigate("access")}
-              aria-label="Open Access and passkeys"
-              aria-current={now === "access" ? "page" : undefined}
-              className={`px-2.5 py-2 rounded-lg whitespace-nowrap text-[13px] font-medium ${
-                now === "access" ? "bg-accent-soft text-accent" : "text-accent hover:bg-accent-soft"
-              }`}
-            >
-              Access &amp; passkeys
-            </button>
-            <button
-              type="button"
-              aria-expanded={menuOpen}
-              aria-controls="owner-primary-navigation"
-              onClick={() => setMenuOpen((open) => !open)}
-              className="px-2.5 py-2 rounded-lg text-[13px] font-medium text-ink-soft hover:bg-paper hover:text-ink"
-            >
-              {menuOpen ? "Close" : "Menu"}
-            </button>
-          </div>
+          <button
+            ref={menuButton}
+            type="button"
+            aria-expanded={menuOpen}
+            aria-controls="owner-primary-navigation"
+            onClick={menuOpen ? closeMenu : () => setMenuOpen(true)}
+            className="shrink-0 px-2.5 py-2 rounded-lg text-[13px] font-medium text-ink-soft hover:bg-paper hover:text-ink lg:hidden"
+          >
+            {menuOpen ? "Close" : "Menu"}
+          </button>
         </div>
         <nav
           id="owner-primary-navigation"
           aria-label="Primary"
-          className={`${menuOpen ? "grid" : "hidden"} grid-cols-2 gap-1 w-full pt-2 mt-2 border-t border-line text-[13.5px] lg:mt-0 lg:flex lg:items-center lg:w-auto lg:pt-0 lg:border-0`}
+          className={`${menuOpen ? "grid" : "hidden"} grid-cols-2 gap-1 w-full pt-2 mt-2 border-t border-line text-[13.5px] lg:mt-0 lg:flex lg:flex-wrap lg:justify-end lg:items-center lg:w-auto lg:pt-0 lg:border-0`}
         >
           <Tab now={now} go={navigate} to="home">Home</Tab>
           <Tab now={now} go={navigate} to="year">This Year</Tab>
@@ -317,7 +332,30 @@ export function OwnerHeader({ owner, now, go }: {
           <Tab now={now} go={navigate} to="documents">Documents</Tab>
           <Tab now={now} go={navigate} to="ask">Explore</Tab>
           <Tab now={now} go={navigate} to="review">Add &amp; Review</Tab>
-          <Tab now={now} go={navigate} to="access" mobileHidden>Access</Tab>
+          <a href={bankConfigured === false ? "/app?view=access#banks" : "/app/connect/bank"} onClick={followBanks} className={`${OWNER_NAV_ITEM} ${INACTIVE_NAV_ITEM} content-center min-h-11 text-[15px] font-semibold`}>Banks</a>
+          <Tab now={now} go={navigate} to="access">Settings</Tab>
+          <div className="relative">
+            <button
+              type="button"
+              aria-expanded={helpOpen}
+              aria-controls="owner-help"
+              onClick={() => setHelpOpen((open) => !open)}
+              className={`${OWNER_NAV_ITEM} ${INACTIVE_NAV_ITEM}`}
+            >Help</button>
+            <section
+              id="owner-help"
+              aria-label="Help"
+              hidden={!helpOpen}
+              className="absolute left-0 top-full z-10 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-xl border border-line bg-card p-4 shadow-lg lg:left-auto lg:right-0"
+            >
+              {supportContact ? (
+                <a href={supportContact} onClick={closeMenu} className="text-accent underline">Contact support</a>
+              ) : (
+                <p>Ask the person who set up your Brain. On their computer, <code>brain support --preview</code> shows a safe note to send.</p>
+              )}
+            </section>
+          </div>
+          <SignOutConfirm triggerClassName={`${OWNER_NAV_ITEM} ${INACTIVE_NAV_ITEM}`} />
         </nav>
       </div>
     </header>
@@ -362,12 +400,11 @@ function UnavailableSession({ message }: { message: string }) {
   );
 }
 
-function Tab({ now, to, go, children, mobileHidden = false }: {
+function Tab({ now, to, go, children }: {
   now: View;
   to: View;
   go: (v: View) => void;
   children: ReactNode;
-  mobileHidden?: boolean;
 }) {
   const active = now === to;
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -382,8 +419,8 @@ function Tab({ now, to, go, children, mobileHidden = false }: {
       type="button"
       onClick={() => go(to)}
       aria-current={active ? "page" : undefined}
-      className={`w-full px-3 py-2 rounded-lg whitespace-nowrap text-left lg:w-auto lg:text-center ${mobileHidden ? "hidden lg:block" : ""} ${
-        active ? "bg-accent-soft text-accent font-medium" : "text-ink-soft hover:bg-paper hover:text-ink"
+      className={`${OWNER_NAV_ITEM} ${
+        active ? "bg-accent-soft text-accent font-medium" : INACTIVE_NAV_ITEM
       }`}
     >
       {children}
