@@ -4,6 +4,7 @@ import { enroll } from "../lib/passkey";
 import { Section, Row, Note, Empty, Attention, Badge, Confirm, EditableName, ago } from "./ui";
 import { OwnerPreferences } from "./OwnerPreferences";
 import { DocumentAccess } from "./DocumentAccess";
+import { SignOutConfirm } from "./SignOutConfirm";
 import { PasskeyDiagnostics } from "./PasskeyDiagnostics";
 import { bankRowOutcome } from "../lib/bank-outcome";
 import { BANK_BUTTON, BankConnectionRow } from "./BankConnectionRow";
@@ -60,6 +61,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
   }
   return (
     <Section
+      id="banks"
       title="Banks"
       headerInCard
       blurb="Banks your Brain reads transactions from. It can’t move money. Your installer sets up bank connections separately."
@@ -415,13 +417,7 @@ export function Settings({ devices, connections, onChange }: {
               Your other devices and connected apps keep working.
             </span>
           </span>
-          <Confirm
-            label="Sign out"
-            question="Sign out here?"
-            tone="quiet"
-            disabled={busy}
-            onConfirm={() => run(async () => { await api("/api/app/signout"); location.reload(); })}
-          />
+          <SignOutConfirm disabled={busy} />
         </Row>
         <Row>
           <span className="min-w-0">

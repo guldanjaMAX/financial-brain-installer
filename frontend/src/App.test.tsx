@@ -141,13 +141,18 @@ describe("principal workspace routing", () => {
     expect(initialOwnerView()).toBe("home");
   });
 
-  it("uses a visible mobile menu and keeps Access and passkeys directly findable", () => {
+  it("keeps the owner menu basics and the existing Settings deep link", () => {
+    vi.stubGlobal("location", { search: "?view=access" });
     const html = renderToStaticMarkup(
-      <OwnerHeader owner="Fixture Owner" now="home" go={() => undefined} />,
+      <OwnerHeader owner="Fixture Owner" now={initialOwnerView()} go={() => undefined} />,
     );
 
-    expect(html).toContain("Access &amp; passkeys");
-    expect(html).toContain('aria-label="Open Access and passkeys"');
+    expect(html).not.toContain("Access");
+    expect(html).not.toContain("hidden lg:block");
+    expect(html).toMatch(/<a href="\/app\/connect\/bank"[^>]*>Banks<\/a>/);
+    expect(html).toMatch(/aria-current="page"[^>]*>Settings<\/button>/);
+    expect(html).toContain(">Help</button>");
+    expect(html).toContain(">Sign out</button>");
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-controls="owner-primary-navigation"');
     expect(html).toContain("Menu");
