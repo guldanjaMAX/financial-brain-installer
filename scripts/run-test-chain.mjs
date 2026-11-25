@@ -488,6 +488,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/setup-browser-sign-in.test.mjs",
   // UX-6-1117 brain setup screens (STEP n of N) in owner words.
   "node --test test/setup-output.test.mjs",
+  "node --test test/windows-launcher-environment.test.mjs",
   "node --test test/setup-public-output.test.mjs",
   "node --test test/windows-preflight-contract.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
@@ -1333,6 +1334,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/zone-assignment-retry.test.mjs",
   "node --test test/setup-browser-sign-in.test.mjs",
   "node --test test/setup-output.test.mjs",
+  "node --test test/windows-launcher-environment.test.mjs",
   "node --test test/setup-public-output.test.mjs",
   "node --no-warnings test/source-failure-evidence.test.mjs",
   "node --no-warnings --test test/owner-financial-map-migration.test.mjs worker/test/owner-financial-map.test.mjs",

@@ -47,7 +47,7 @@ try {
   $info.Arguments = '"' + (Join-Path $root 'launcher.mjs') + '"'
   if ($SelfCheck) { $info.Arguments += ' --self-check'; $info.CreateNoWindow = $true }
   $info.EnvironmentVariables.Clear()
-  foreach ($name in @('SystemRoot','WINDIR','COMSPEC','USERPROFILE','LOCALAPPDATA','APPDATA','TEMP','TMP')) {
+  foreach ($name in @('SystemRoot','WINDIR','COMSPEC','USERPROFILE','LOCALAPPDATA','APPDATA','TEMP','TMP','USERNAME')) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($value) { $info.EnvironmentVariables[$name] = $value }
   }

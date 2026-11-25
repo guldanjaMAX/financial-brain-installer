@@ -6,7 +6,7 @@ export function setupEnvironment({ root, environment }) {
   // Select private Node directly; inherited loaders and credentials must not
   // change the CLI child. No global npm, PATH mutation or shell is needed.
   const env = {};
-  for (const key of ['SystemRoot', 'WINDIR', 'COMSPEC', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP']) {
+  for (const key of ['SystemRoot', 'WINDIR', 'COMSPEC', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'USERNAME']) {
     if (environment[key]) env[key] = environment[key];
   }
   // Derive only the official native Claude directory, never inherit desktop

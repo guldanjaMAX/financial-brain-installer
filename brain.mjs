@@ -23830,6 +23830,10 @@ export async function completeSetupFolderStep({
   log = info,
   platform = process.platform,
 } = {}) {
+  // The Brain is installed before this optional load; keep its locator even
+  // when the folder is missing or the load is interrupted.
+  if (typeof remember !== "function") throw new TypeError("the installed-manifest writer is unavailable");
+  remember();
   let skippedRetiredFolder = false;
   if (folder) {
     const decision = retiredLocalFolderVariant(
@@ -23848,14 +23852,11 @@ export async function completeSetupFolderStep({
       if (typeof ingest !== "function") throw new TypeError("the setup folder loader is unavailable");
       await ingest();
     } else {
-      closePrompts();
-      die(`no such folder: ${folder}. Nothing was loaded. Fix the path and re-run setup.`);
+      log("That folder was not found, so nothing was loaded. Your Brain is ready; you can load a folder later.");
     }
   } else {
     log(renderCliCommands(`load one later with: brain ingest ${shownManifestPath} --path <dir>`));
   }
-  if (typeof remember !== "function") throw new TypeError("the installed-manifest writer is unavailable");
-  remember();
   return Object.freeze({ skippedRetiredFolder });
 }
 
@@ -24363,6 +24364,7 @@ export async function cmdSetup(manifestPath, options = {}) {
     for (const line of renderCliCommands(sliceCheck.fix).split("\n")) console.log(`  ${c.dim(line.trim() ? "  " + line.trim() : "")}`);
   }
   const folder = flags.path || (await prompt("A folder to load now (blank to skip)", ""));
+  let setupFilesLoaded = false;
   await completeSetupFolderStep({
     manifest: m,
     manifestPath: target,
@@ -24371,7 +24373,12 @@ export async function cmdSetup(manifestPath, options = {}) {
     platform: options.platform || process.platform,
     ingest: async () => {
       process.argv = [process.argv[0], process.argv[1], "ingest", target, "--path", folder, "--source", "documents"];
-      return (options.cmdIngest ?? cmdIngest)(target);
+      const receipt = await (options.cmdIngest ?? cmdIngest)(target);
+      // An existing folder can be empty or entirely excluded. Only a completed
+      // document receipt supports saying that the Brain is reading owner files.
+      setupFilesLoaded = [receipt?.created, receipt?.updated, receipt?.unchanged]
+        .some(count => Number.isSafeInteger(count) && count > 0);
+      return receipt;
     },
     remember: () => {
       // Setup is the one moment the installer knows the durable manifest
@@ -24393,7 +24400,13 @@ export async function cmdSetup(manifestPath, options = {}) {
   console.log(`  ${c.green("✅ STEP 6 of 6 done: first files step complete")}`);
   const countBacklog = options.backlogCount ?? backlogCount;
   const outstanding = await countBacklog(target).catch(() => 0);
-  const setupFinishMessage = "Your Brain is running. So far it holds only a small test note, so it can't answer questions about your business yet. Next, we'll connect Google or load one folder.";
+  // A retry can retain a corpus even when this run loads nothing. Worker
+  // inventory alone cannot prove that corpus is either test-only or ready.
+  const setupFinishMessage = setupFilesLoaded
+    ? "Your Brain is running and reading your files. You can ask questions once it finishes."
+    : workerAlreadyExisted
+      ? "Your Brain is running. You can connect a source or load a folder later."
+      : "Your Brain is running. So far it holds only a small test note, so it can't answer questions about your business yet. Next, we'll connect Google or load one folder.";
   console.log(`\n  ${c.green(c.bold(setupFinishMessage))}\n`);
   if (m.brain?.domain) {
     console.log(`  1. Copy this address: https://${m.brain.domain}/mcp`);
@@ -30611,9 +30624,6 @@ async function cmdSetupInteractive(manifestPath) {
   }
   const resumed = existsSync(target);
   const manifest = resumed ? loadManifest(target).m : null;
-  if (browserSignIn && resumed) {
-    die("--browser-sign-in is for a fresh setup. For an older manifest, use --adopt-cloudflare-profile after the owner approves adoption.");
-  }
   const suppliedAccountId = typeof flags["cloudflare-account-id"] === "string"
     ? flags["cloudflare-account-id"].trim().toLowerCase()
     : null;
@@ -30623,6 +30633,18 @@ async function cmdSetupInteractive(manifestPath) {
   const savedAccountId = manifest?.infrastructure?.cloudflare?.account_id || null;
   if (suppliedAccountId && savedAccountId && suppliedAccountId !== String(savedAccountId).toLowerCase()) {
     die("--cloudflare-account-id does not match the account already bound to this Brain");
+  }
+  // A retry may reuse only the profile and exact account this manifest saved.
+  // Do not turn a retry into implicit profile adoption or account selection.
+  if (browserSignIn && resumed && (
+    !manifest?.infrastructure?.cloudflare?.auth_profile ||
+    !suppliedAccountId || String(savedAccountId || "").toLowerCase() !== suppliedAccountId
+  )) {
+    die(
+      "This setup can resume browser sign-in only with its saved browser sign-in profile " +
+        "and the same --cloudflare-account-id. Nothing was changed. " +
+        "Ask the assistant to review the saved setup before trying again."
+    );
   }
   const accountId = savedAccountId || suppliedAccountId;
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
@@ -36429,6 +36451,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain setup      [manifest] --browser-sign-in --cloudflare-account existing
                                            owner-approved Claude-guided browser sign-in; also pass --name,
                                            --slug, --cloudflare-account-id and --workers-paid-confirmed
+                                           rerun the same reviewed flags to resume only when the saved
+                                           browser sign-in profile and account id match
     brain setup      [manifest] --cloudflare-token  recovery-only hidden API-token entry
     brain setup      [manifest] --no-connect  same, without touching THIS computer's AI tool config
     brain ask        <manifest>            ask a private question in this terminal

@@ -5,7 +5,10 @@ launcher. It is lane evidence, not a signed release or first-answer approval.
 The production MSBuild verifier requires `evidence=real` as well as exact
 version and generated-authoring readback. Synthetic stages remain usable for
 fixture and self-check APIs but cannot pass the installer compilation gate.
-The setup child retains an allowlisted environment and a bounded PATH containing
+Both launchers retain only `SystemRoot`, `WINDIR`, `COMSPEC`, `USERPROFILE`,
+`LOCALAPPDATA`, `APPDATA`, `TEMP`, `TMP` and `USERNAME` from the inherited
+environment. `USERNAME` supplies the Windows admin-key destination identity.
+The setup child also receives a bounded PATH containing
 the private runtime, System32 and the official `%USERPROFILE%\.local\bin`
 Claude directory. The profile must be absolute and contain no PATH delimiter,
 quote or control character. Desktop PATH and loader overrides are not inherited.
