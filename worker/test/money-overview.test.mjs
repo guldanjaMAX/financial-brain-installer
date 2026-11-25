@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { overviewFixture as fixture } from './helpers/money-overview-fixture.mjs';
 import worker from '../src/index.js';
+import { queryMoney } from '../src/lib/money-query.js';
 import { handleMcp } from '../src/lib/mcp-endpoint.js';
 import { accountLinkIdentity } from '../src/lib/fin-account-links.js';
 import { accountKindIdentity } from '../src/lib/fin-account-kinds.js';
@@ -20,6 +21,205 @@ import { MONEY_TOOLS, MONEY_GUIDE, MONEY_ANSWER_INSTRUCTIONS } from '../src/lib/
 const NOW = Date.parse('2026-01-01T02:00:00Z');
 const STAMP = '2025-12-31T18:00:00Z';
 const load = () => import('../src/lib/money-overview.js');
+
+test('complete historical coverage cannot certify a receipt after the evidence instant', async t => {
+  const { overviewMoney } = await load();
+  const f = fixture(t);
+  const instant = Date.parse('2025-12-31T00:30:00Z');
+  f.account('deposit', 'live');
+  f.connection('deposit');
+  f.coverage('deposit', '2025-12-29', '2025-12-30');
+  f.row('historical', 'deposit', '2025-12-30', 4321);
+  const read = async (receipt, expectedSync) => {
+    f.run('UPDATE bank_feed_items SET last_synced_at=?', receipt);
+    const result = await queryMoney(f.env, {
+      sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE account_slug='deposit' AND posted_on='2025-12-30'",
+      from:'2025-12-30', through:'2025-12-30',
+    }, {now: () => instant});
+    assert.equal(result.rows[0].figure, 4321);
+    assert.doesNotMatch(result.confidence_text, /without confirmed complete coverage|not connected/);
+    const overview = await overviewMoney(f.env, {now: () => instant});
+    assert.equal(overview.today, '2025-12-30');
+    assert.equal(overview.accounts[0].connected, true);
+    assert.equal(overview.accounts[0].coverage_confirmed, 1);
+    assert.equal(overview.accounts[0].last_observed_at, STAMP);
+    assert.equal(overview.accounts[0].last_sync, expectedSync);
+    return result.confidence_text;
+  };
+  const seed = 186731;
+  const missing = /Account ending 1234 has no verified successful sync time at this evidence instant/;
+  const after = new Date(instant + seed).toISOString();
+  const before = new Date(instant - seed).toISOString();
+  const exact = new Date(instant).toISOString();
+  for (const [name, receipt] of [
+    ['future UTC', after],
+    ['future with explicit offset', new Date(instant + seed + 3600000).toISOString().replace('Z', '+01:00')],
+    ['missing', null],
+    ['malformed', '2025-12-31TinvalidZ'],
+  ]) {
+    await t.test(name, async () => {
+      assert.doesNotMatch(await read(before, before), missing);
+      assert.doesNotMatch(await read(exact, exact), missing);
+      assert.match(await read(receipt, null), missing);
+    });
+  }
+});
+
+test('civil sync receipts are checked through both money tools', async t => {
+  const { overviewMoney } = await load();
+  const f = fixture(t);
+  const day = '2025-12-03';
+  const options = { now: () => Date.parse('2025-12-04T00:30:00Z') };
+  const missing = /Account ending 1234 has no verified successful sync time/;
+  f.account('deposit', 'live');
+  f.connection('deposit');
+  f.coverage('deposit', day, day);
+  f.row('civil-receipt', 'deposit', day, 4321);
+  const read = async (receipt, accepted) => {
+    f.run('UPDATE bank_feed_items SET last_synced_at=?', receipt);
+    if (receipt === null) f.run('UPDATE bank_feed_health SET last_successful_sync_at=NULL,data_through=NULL');
+    const query = await queryMoney(f.env, {
+      sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE posted_on='2025-12-03'",
+      from: day, through: day,
+    }, options);
+    const overview = await overviewMoney(f.env, options);
+    assert.equal(query.rows[0].figure, 4321);
+    assert.equal(overview.accounts[0].coverage_confirmed, 1);
+    assert.equal(overview.accounts[0].connected, true);
+    assert.equal(overview.accounts[0].last_observed_at, STAMP);
+    for (const result of [query, overview]) {
+      if (accepted) assert.doesNotMatch(result.confidence_text, missing);
+      else {
+        assert.match(result.confidence_text, missing);
+        assert.ok(!result.confidence_text.includes(receipt), 'impossible receipt stays private');
+      }
+    }
+    assert.equal(overview.accounts[0].last_sync, accepted ? receipt : null);
+    return [query.confidence, overview.confidence];
+  };
+  const seed = 416827;
+  for (const [index, [name, invalid, valid]] of [
+    ['leap day', '2025-02-29T23:30:00Z', '2024-02-29T23:30:00Z'],
+    ['April length', '2025-04-31T23:30:00Z', '2025-04-30T23:30:00Z'],
+    ['November length', '2025-11-31T23:30:00Z', '2025-11-30T23:30:00Z'],
+    ['month', '2025-13-30T23:30:00Z', '2025-12-03T23:30:00Z'],
+    ['hour', '2025-12-02T24:00:00Z', '2025-12-02T23:00:00Z'],
+    ['minute', '2025-12-03T23:60:00Z', '2025-12-03T23:59:00Z'],
+    ['second', '2025-12-03T23:30:60Z', '2025-12-03T23:30:59Z'],
+    ['offset hour', '2025-12-03T23:30:00+25:00', '2025-12-03T23:30:00+01:00'],
+    ['offset minute', '2025-12-03T23:30:00-00:60', '2025-12-03T23:30:00-00:59'],
+  ].entries()) {
+    await t.test(name, async () => {
+      const fraction = String((seed + index) % 1000).padStart(3, '0');
+      await read(valid.replace(/(Z|[+-]\d{2}:\d{2})$/, `.${fraction}$1`), true);
+      if (name === 'hour') await read('2025-12-02T23:00Z', true);
+      const invalidConfidence = await read(invalid, false);
+      assert.deepEqual(invalidConfidence, await read(null, false), 'invalid and missing receipts have the same evidence');
+    });
+  }
+});
+
+test('Item receipts and account observations stay with their provider across reference collisions', async t => {
+  const { overviewMoney } = await load();
+  const providers = ['plaid', 'simplefin'];
+  const seed = 518293;
+  const day = '2025-12-03';
+  const ownSync = day + 'T21:30:00Z', ownObservation = day + 'T21:00:00Z';
+  const otherSync = day + 'T22:30:00Z', otherObservation = day + 'T22:00:00Z';
+  const options = { now: () => Date.parse('2025-12-04T00:30:00Z') };
+  for (const [index, [provider, otherProvider]] of providers.flatMap(a => providers.map(b => [a, b])).entries()) {
+    await t.test(provider + '/' + otherProvider, async row => {
+      const f = fixture(row);
+      const own = 'own-' + (seed + index), other = 'other-' + (seed + index);
+      for (const [slug, kind, mask, receipt, observation] of [
+        [own, provider, '1234', ownSync, ownObservation],
+        [other, otherProvider, '5678', otherSync, otherObservation],
+      ]) {
+        f.account(slug, 'live');
+        f.connection(slug, kind);
+        f.coverage(slug, day, day);
+        f.row(slug, slug, day, mask === '1234' ? 4321 : 1234);
+        f.run('UPDATE fin_accounts SET mask=?,source_feed=? WHERE account_slug=?', mask, 'bank-feed:' + slug, slug);
+        f.run('UPDATE bank_feed_items SET last_synced_at=? WHERE item_ref=?', receipt, slug);
+        const table = kind === 'plaid' ? 'plaid_account_entity_assignments' : 'simplefin_account_assignments';
+        f.run(`UPDATE ${table} SET provider_account_id=?, last_seen_at=? WHERE item_ref=?`, slug, observation, slug);
+        if (kind === 'plaid') f.run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?', slug, slug);
+      }
+      const otherTable = otherProvider === 'plaid' ? 'plaid_account_entity_assignments' : 'simplefin_account_assignments';
+      const otherRef = f.db.prepare(`SELECT account_ref FROM ${otherTable} WHERE item_ref=?`).get(other).account_ref;
+      const discovered = /1 discovered feed accounts have no current ledger account/;
+      const missingConnection = /Account ending 1234 is not connected/;
+      const missingSync = /Account ending 1234 has no verified successful sync time/;
+      const read = async ({ connected, assigned = true, observed = ownObservation, donorMapped = true, providerConflict = false }) => {
+        const query = await queryMoney(f.env, {
+          sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE posted_on='2025-12-03'",
+          from: day, through: day,
+        }, options);
+        const observations = await queryMoney(f.env, {
+          sql: "SELECT account_slug,last_observed_at,feed_kind FROM coverage",
+          from: day, through: day,
+        }, options);
+        const scoped = await queryMoney(f.env, {
+          sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE posted_on='2025-12-03'",
+          from: day, through: day, account_slugs: [own],
+        }, options);
+        const overview = await overviewMoney(f.env, options);
+        assert.equal(query.rows[0].figure, 5555);
+        assert.equal(overview.status, 'complete');
+        const account = overview.accounts.find(a => a.account_slug === own);
+        const donor = overview.accounts.find(a => a.account_slug === other);
+        assert.equal(account.row_count, 1);
+        assert.equal(donor.connected, donorMapped);
+        assert.equal(donor.last_sync, donorMapped ? otherSync : null);
+        for (const result of [query, overview]) {
+          const check = connected ? assert.doesNotMatch : assert.match;
+          check(result.confidence_text, missingConnection);
+          check(result.confidence_text, missingSync);
+          if (assigned) assert.doesNotMatch(result.confidence_text, /discovered feed accounts have no current ledger account/);
+          else assert.match(result.confidence_text, discovered);
+          const checkConflict = providerConflict ? assert.match : assert.doesNotMatch;
+          checkConflict(result.confidence_text, /provider conflict.*dollar impact are unknown/i);
+        }
+        assert.equal(account.connected, connected);
+        assert.equal(account.last_sync, connected ? ownSync : null);
+        assert.equal(account.last_observed_at, observed);
+        const coverage = observations.rows.find(a => a.account_slug === own);
+        assert.equal(coverage.last_observed_at, observed);
+        if (observed) assert.equal(coverage.feed_kind, provider);
+        assert.equal(scoped.rows[0].figure, 4321);
+        if (observed) assert.ok(scoped.confidence_text.includes(ownSync), 'own health observation reached');
+        assert.ok(!scoped.confidence_text.includes(otherSync), 'another Item cannot supply scoped health');
+      };
+      await read({ connected: true });
+      if (provider === 'plaid') {
+        f.run('UPDATE plaid_account_entity_assignments SET provider_account_id=? WHERE item_ref=?', otherRef, own);
+      } else {
+        // SimpleFIN ledger references are public. Its raw IDs can collide
+        // without changing the ledger binding.
+        f.run('UPDATE simplefin_account_assignments SET provider_account_id=? WHERE item_ref=?', otherRef, own);
+      }
+      if (provider === 'plaid') f.run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?', otherRef, own);
+      await row.test('connected', () => read({ connected: true }));
+      await row.test('revoked', async () => {
+        f.run("UPDATE bank_feed_items SET status='permission_revoked' WHERE item_ref=?", own);
+        await read({ connected: false });
+      });
+      await row.test('wrong Item cannot hide an unassigned feed', async () => {
+        f.run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?', otherRef, own);
+        f.run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?', 'unmapped', other);
+        // Retire the target's own assignment so only the donor is unassigned.
+        if (provider === 'plaid') f.run('DELETE FROM plaid_account_entity_assignments WHERE item_ref=?', own);
+        else f.run('DELETE FROM simplefin_account_assignments WHERE item_ref=?', own);
+        await read({ connected: false, assigned: false, observed: null, donorMapped: false });
+      });
+      if (provider !== otherProvider) await row.test('wrong provider cannot use the correct Item reference', async () => {
+        f.run(`UPDATE ${otherTable} SET item_ref=? WHERE item_ref=?`, own, other);
+        f.run("UPDATE bank_feed_items SET status='connected' WHERE item_ref=?", own);
+        await read({ connected: false, assigned: false, observed: null, donorMapped: false, providerConflict: true });
+      });
+    });
+  }
+});
 
 test('founder confidence: complete, missing card, five-day gap, unproved dollars and stale feed use real evidence', async t => {
   const { overviewMoney } = await load(); const f = fixture(t);
@@ -396,7 +596,8 @@ test('overview detects output truncation and bounds a stalled connection read af
   const prepare = f.env.DB.prepare;
   let stalled = 0;
   f.env.DB.prepare = sql => {
-    if (sql.includes('JOIN bank_feed_items')) return { all: () => { stalled++; return new Promise(() => {}); } };
+    if (sql.startsWith('SELECT a.tenant_id,a.account_slug') && sql.includes('AS account_kind_review_json'))
+      return { all: () => { stalled++; return new Promise(() => {}); } };
     return prepare(sql);
   };
   const partial = await overviewMoney(f.env, { now: () => NOW, timeoutMs: 1000 });

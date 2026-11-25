@@ -3,18 +3,23 @@ import { moneyMinorText } from './money-format.js';
 import { moneyOverlapGroups } from './money-query-overlap.js';
 import { openingRowSql, historyCoverageStartSql, historyHoles } from './money-history.js';
 import { pendingInScope } from './money-pending.js';
+import { ASSIGNED_MONEY_FEED_SQL as assignedFeed, ASSIGNED_MONEY_FEED_SYNC_SQL, DISCOVERED_PROVIDER_CONFLICT_SQL,
+  DISCOVERED_LEDGER_REFERENCE_SQL, MONEY_FEED_ASSIGNMENTS_SQL, SIMPLEFIN_LEDGER_REFERENCE_SQL } from './money-feed-assignment.js';
 
-// Confidence is an evidence score, never permission to withhold an answer.
-// Keep private connection reads fixed and project only safe facts. This runs in
-// the same SQLite statement as its clean evidence snapshot, which must match
-// the completed amount snapshot before it can certify anything. No credential
-// or provider identifier is selected.
-const assignedFeed = `b.tenant_id=a.tenant_id AND b.removed_at IS NULL AND b.environment='production'
-  AND b.status='connected' AND a.feed_mode='live' AND a.status='open'
-  AND EXISTS(SELECT 1 FROM (
-    SELECT tenant_id,account_ref,item_ref FROM plaid_account_entity_assignments WHERE entity_slug IS NOT NULL
-    UNION ALL SELECT tenant_id,account_ref,item_ref FROM simplefin_account_assignments WHERE entity_slug IS NOT NULL
-  ) p WHERE p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref AND p.item_ref=b.item_ref)`;
+export function verifiedMoneySyncInstant(receipt, instant) {
+  const parts = typeof receipt === 'string' &&
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(receipt);
+  if (!parts || parts[0] !== receipt) return null;
+  const [year, month, day, hour, minute, second = 0, offsetHour = 0, offsetMinute = 0] =
+    parts.slice(1).map(value => value === undefined ? undefined : Number(value));
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthLength = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  // Date.parse normalizes some impossible civil times, including November 31.
+  if (!monthLength || day < 1 || day > monthLength || hour > 23 || minute > 59 ||
+      second > 59 || offsetHour > 23 || offsetMinute > 59) return null;
+  const sync = Date.parse(receipt);
+  return sync <= instant ? sync : null;
+}
 
 // The saved request bounds the provider history, never a rolling date computed
 // at answer time. Completion and readable confirmed coverage are separate facts.
@@ -26,7 +31,7 @@ const requestedHistory = completed => `(SELECT MIN(date(substr(h.queued_at,1,10)
     ${completed ? `AND h.state='complete' AND h.unread_lines=0 AND h.finished_at>=h.queued_at
       AND h.finished_at<=b.last_synced_at AND (h.provider_history_state='HISTORICAL_UPDATE_COMPLETE'
         OR EXISTS(SELECT 1 FROM simplefin_account_assignments s WHERE s.tenant_id=a.tenant_id
-          AND s.account_ref=a.external_ref AND s.item_ref=b.item_ref AND s.entity_slug IS NOT NULL))` : ''})`;
+          AND s.item_ref=b.item_ref AND s.entity_slug IS NOT NULL AND ${SIMPLEFIN_LEDGER_REFERENCE_SQL}))` : ''})`;
 const firstPostedSql = `(SELECT MIN(t.posted_on) FROM fin_transactions t WHERE t.tenant_id=a.tenant_id
     AND t.account_slug=a.account_slug AND t.pending=0 AND t.removed_at IS NULL AND t.superseded_by_id IS NULL
     AND date(t.posted_on,'+0 days')=t.posted_on)`;
@@ -34,11 +39,16 @@ export const MONEY_ACCOUNT_HISTORY_SQL = `json_object(
   'first_posted',${firstPostedSql},'first_row_opening',${openingRowSql('a',firstPostedSql)},
   'requested_from',${requestedHistory(false)},'completed_from',${requestedHistory(true)})`;
 
+// Confidence is an evidence score, never permission to withhold an answer.
+// Keep private connection reads fixed and project only safe facts. This runs in
+// the same SQLite statement as its clean evidence snapshot, which must match
+// the completed amount snapshot before it can certify anything. No credential
+// or provider identifier is selected.
 export const MONEY_CONFIDENCE_SNAPSHOT_SQL = `SELECT 'confidence_accounts' AS snapshot_kind,json_object(
   'tenant_id',a.tenant_id,'account_slug',a.account_slug,'last4',a.mask,'currency',a.currency,'feed_mode',a.feed_mode,
   'opened_on',a.opened_on,'closed_on',a.closed_on,'history',${MONEY_ACCOUNT_HISTORY_SQL},
   'connected',EXISTS(SELECT 1 FROM bank_feed_items b WHERE ${assignedFeed}),
-  'last_sync',(SELECT MAX(b.last_synced_at) FROM bank_feed_items b WHERE ${assignedFeed}),
+  'last_sync',${ASSIGNED_MONEY_FEED_SYNC_SQL},
   'covered_from',${historyCoverageStartSql('a',firstPostedSql,"c.coverage_status='complete' AND c.basis_state='confirmed'")},'covered_to',c.covered_to,
   'coverage_confirmed',CASE WHEN c.coverage_status='complete' AND c.basis_state='confirmed'
     AND date(c.covered_from,'+0 days')=c.covered_from AND date(c.covered_to,'+0 days')=c.covered_to
@@ -46,12 +56,13 @@ export const MONEY_CONFIDENCE_SNAPSHOT_SQL = `SELECT 'confidence_accounts' AS sn
     THEN 1 ELSE 0 END
 ) AS value,NULL AS value2 FROM (SELECT * FROM fin_accounts WHERE superseded_by_id IS NULL ORDER BY tenant_id,account_slug LIMIT 1001) a
 LEFT JOIN fin_account_coverage c ON c.tenant_id=a.tenant_id AND c.account_slug=a.account_slug AND c.superseded_by_id IS NULL
-UNION ALL SELECT 'confidence_unassigned',json_object('tenant_id',p.tenant_id,'account_count',count(*)),NULL FROM (
-  SELECT tenant_id,account_ref,item_ref FROM plaid_account_entity_assignments
-  UNION SELECT tenant_id,account_ref,item_ref FROM simplefin_account_assignments
-) p WHERE EXISTS(SELECT 1 FROM bank_feed_items b WHERE b.tenant_id=p.tenant_id AND b.item_ref=p.item_ref
+UNION ALL SELECT 'confidence_unassigned',json_object('tenant_id',p.tenant_id,'account_count',count(*),
+  'provider_conflict_count',SUM(${DISCOVERED_PROVIDER_CONFLICT_SQL})),NULL
+FROM (${MONEY_FEED_ASSIGNMENTS_SQL}) p
+WHERE EXISTS(SELECT 1 FROM bank_feed_items b WHERE b.tenant_id=p.tenant_id AND b.item_ref=p.item_ref
   AND b.environment='production' AND b.removed_at IS NULL)
-  AND NOT EXISTS(SELECT 1 FROM fin_accounts a WHERE a.tenant_id=p.tenant_id AND a.external_ref=p.account_ref AND a.superseded_by_id IS NULL)
+  AND NOT EXISTS(SELECT 1 FROM fin_accounts a WHERE a.tenant_id=p.tenant_id AND a.superseded_by_id IS NULL
+    AND ${DISCOVERED_LEDGER_REFERENCE_SQL})
 GROUP BY p.tenant_id
 UNION ALL SELECT 'confidence_pending',json_object('tenant_id',tenant_id,'account_slug',account_slug,
   'posted_on',posted_on,'currency',currency,'direction',direction,'amount_minor',SUM(amount_minor),'row_count',count(*)),NULL
@@ -197,13 +208,13 @@ export function limitMoneyConfidence(confidence, reason, missing, cap = 69) {
 // This is deliberately a small proof grammar, not a SQL guesser. A literal in a
 // projection, subquery, OR arm or CTE must never certify the caller's period.
 // Unsupported SQL still executes; it simply cannot earn a verified scope.
-export function moneyConfidenceScope({ tokens }) {
+export function moneyConfidenceScope({ tokens }, table = 'txn') {
   const words = tokens.filter(t => t.kind === 'word').map(t => t.v);
   if (tokens[0]?.v !== 'select' || words.filter(v => v === 'select').length !== 1 ||
       words.filter(v => v === 'from').length !== 1 || words.some(v => ['join','or','union','except','intersect','offset','window','over'].includes(v))) return null;
   const from = tokens.findIndex(t => t.kind === 'word' && t.v === 'from');
-  if (tokens[from + 1]?.v !== 'txn') return null;
-  let i = from + 2, alias = 'txn';
+  if (tokens[from + 1]?.v !== table) return null;
+  let i = from + 2, alias = table;
   if (tokens[i]?.v === 'as') i++;
   if (tokens[i]?.kind === 'word' && tokens[i].v !== 'where') alias = tokens[i++].v;
   if (tokens[i++]?.v !== 'where') return null;
@@ -223,7 +234,7 @@ export function moneyConfidenceScope({ tokens }) {
     // positive-contribution filter cannot prove that excluded rows are safe.
     if (tokens[i]?.v === 'lower' && tokens[i+1]?.v === '(') {
       let j=i+2, column=tokens[j++];
-      if (tokens[j]?.v==='.' && [alias,'txn'].includes(column?.v)) { j++; column=tokens[j++]; }
+      if (tokens[j]?.v==='.' && [alias,table].includes(column?.v)) { j++; column=tokens[j++]; }
       if (column?.v!=='description' || tokens[j++]?.v!==')' || tokens[j++]?.v!=='like' ||
           tokens[j]?.kind!=='string' || !['%interest%','%fee%'].includes(tokens[j].raw.slice(1,-1))) return null;
       if (seen.has('description')) return null;
@@ -235,7 +246,7 @@ export function moneyConfidenceScope({ tokens }) {
     }
     let column = tokens[i++];
     if (tokens[i]?.v === '.') {
-      if (column.v !== alias && column.v !== 'txn') return null;
+      if (column.v !== alias && column.v !== table) return null;
       i++; column = tokens[i++];
     }
     if (!['word','identifier'].includes(column?.kind) || seen.has(column.v) && column.v!=='posted_on') return null;
@@ -259,6 +270,10 @@ export function moneyConfidenceScope({ tokens }) {
         scope[bound]=value.raw.slice(1,-1);
       }
       else return null;
+    } else if (table==='fin_transactions' &&
+        (column.v==='amount_minor' && ['=','<>','!=','>','>=','<','<='].includes(op) && value?.kind==='number' ||
+         column.v==='source_provider' && ['=','<>','!='].includes(op) && value?.kind==='string')) {
+      // These posting predicates leave the account and date bounds intact.
     } else {
       if (['income_minor','expense_minor'].includes(column.v) && op==='>' && value?.kind==='number' && value.v==='0') {
         (scope.positiveContributions ||= []).push(column.v);
@@ -323,7 +338,7 @@ export function moneyConfidenceScope({ tokens }) {
       if(!t || depth===0 && [',','having','order','limit'].includes(t.v)) {
         const item=tokens.slice(start,cursor),values=item.map(t=>t.v);
         if(item.every(t=>t.kind!=='string') && (values.join(' ')==='currency' ||
-          values.length===3 && [alias,'txn'].includes(values[0]) && values[1]==='.' && values[2]==='currency'))scope.currenciesSeparated=true;
+          values.length===3 && [alias,table].includes(values[0]) && values[1]==='.' && values[2]==='currency'))scope.currenciesSeparated=true;
         if(t?.v!==',')break;
         start=cursor+1;
       } else if(t.v==='(')depth++;else if(t.v===')')depth--;
@@ -340,7 +355,7 @@ export function moneyConfidenceScope({ tokens }) {
       const values = p.map(t => t.v);
       if (values.at(-2) === 'as' && values.at(-1) === 'currency') values.splice(-2);
       return values.length === 1 && values[0] === 'currency' && p[0].kind !== 'string' ||
-        values.length === 3 && [alias, 'txn'].includes(values[0]) && values[1] === '.' && values[2] === 'currency';
+        values.length === 3 && [alias, table].includes(values[0]) && values[1] === '.' && values[2] === 'currency';
     };
     // A literal/CASE alias or duplicate currency projection must not relabel
     // a correctly grouped amount and then inherit High from its grouping.
@@ -591,14 +606,34 @@ export function confidenceAmountsSql(ctes, scope, binds) {
     ORDER BY tenant_id,account_slug,currency,direction,kind`;
 }
 
+export function moneyDiscoveryGaps(unassigned, scope) {
+  const gaps = [];
+  let count = 0;
+  if (!scope.filters?.account_slug) for (const a of unassigned || []) {
+    if (scope.filters?.tenant_id && scope.filters.tenant_id !== a.tenant_id) continue;
+    count += a.account_count;
+    gaps.push({
+      reason: `${a.account_count} discovered feed accounts have no current ledger account; their coverage and dollar impact are unknown.`,
+      missing: `${a.account_count} discovered accounts: record their last four, confirm the owner assignment and connect complete history for ${scope.from} through ${scope.to}.`,
+    });
+    if (a.provider_conflict_count) gaps.push({
+      reason: `${a.provider_conflict_count} discovered feed accounts have a provider conflict between their assignment and Item; their coverage and dollar impact are unknown.`,
+      missing: 'Verify the provider and Item for the discovered accounts before using their feed evidence.',
+    });
+  }
+  return { count, gaps };
+}
+
 export function scoreMoneyConfidence({ accounts, coverage, amounts, pending, unassigned, scope, instant, timeZone, truncated = false, historyRows=[], pendingRequested=false,immaterialRisk=false }) {
   if (!scope) return { level: 'Low', percent: truncated ? 20 : 40,
     reasons: ['The query period and account scope are not proved by a simple literal-bounded clean transaction selection.' + (truncated ? ' Returned rows are truncated.' : '')],
     missing: ['Prove the requested period and account scope using confirmed coverage and a clean txn selection with literal posted_on BETWEEN dates and AND-only account filters. Review raw lifecycle states, duplicate feeds and document evidence separately.'] };
   if (!Array.isArray(accounts) || accounts.length > 1000 || !Array.isArray(amounts) || !dateValue(scope.from) || !dateValue(scope.to) || !Number.isFinite(instant))
     return unknownMoneyConfidence();
+  const discovery = moneyDiscoveryGaps(unassigned, scope);
   const inventory = accounts.filter(a => matches(a, scope));
-  if (!inventory.length) return unknownMoneyConfidence('No needed accounts are verified in the recorded inventory.', 'Record and connect the needed accounts, with last four and confirmed coverage for ' + scope.from + ' through ' + scope.to + '. Missing dollar impact is unknown.');
+  if (!inventory.length) return discovery.gaps.reduce((confidence, { reason, missing }) => limitMoneyConfidence(confidence, reason, missing),
+    unknownMoneyConfidence('No needed accounts are verified in the recorded inventory.', 'Record and connect the needed accounts, with last four and confirmed coverage for ' + scope.from + ' through ' + scope.to + '. Missing dollar impact is unknown.'));
   const selected = inventory.filter(a => (!moneyAccountStart(a) || moneyAccountStart(a) <= scope.to) && (!dateValue(a.closed_on) || a.closed_on >= scope.from));
   let score = 100, ceiling = 100, missingAccounts = 0, missingDays = 0, totalDays = 0;
   const reasons = [], missing = [];
@@ -650,8 +685,9 @@ export function scoreMoneyConfidence({ accounts, coverage, amounts, pending, una
       lower(a.replacement_intervals?.length ? 69 : 89, `${label}${lateStart ? `: bank history only starts ${a.covered_from}; it` : ''} has ${n} days without confirmed complete coverage: ${start} through ${end}; missing dollar impact is unknown.`,
         `${label}: ${start} through ${end} (${n} days). Supply complete statements or successfully synced history and confirm these coverage dates.`);
     }
-    const sync = typeof a.last_sync === 'string' && /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(a.last_sync) ? Date.parse(a.last_sync) : NaN;
-    if (!completeStatement && (!Number.isFinite(sync) || sync > instant) && !(a.coverage_confirmed && a.covered_to>=to && Number.isFinite(sync) && a.last_sync.slice(0,10)>=to)) {
+    // Confirmed history can cover the period even when its sync receipt fails the clock check.
+    const sync = verifiedMoneySyncInstant(a.last_sync, instant);
+    if (!completeStatement && sync === null) {
       lower(69, `${label} has no verified successful sync time at this evidence instant.`, `${label}: record a successful feed sync with a valid completed timestamp; assignment observations are insufficient.`);
     } else if (!completeStatement && instant - sync > 2 * DAY && a.last_sync.slice(0,10)<to) {
       const age = Math.floor((instant - sync) / DAY);
@@ -671,13 +707,8 @@ export function scoreMoneyConfidence({ accounts, coverage, amounts, pending, una
     ]) if (c[field] > 0) lower(field === 'unreadable_rows' ? 69 : 89,
       `${label} has ${c[field]} ${detail} in its read history; their period and dollar impact are unknown.`, `${label}: ${fix} before certifying the requested period.`);
   }
-  let unknownAccounts = 0;
-  if (!scope.filters?.account_slug) for (const a of unassigned || []) {
-    if (scope.filters?.tenant_id && scope.filters.tenant_id !== a.tenant_id) continue;
-    unknownAccounts += a.account_count;
-    lower(69, `${a.account_count} discovered feed accounts have no current ledger account; their coverage and dollar impact are unknown.`,
-      `${a.account_count} discovered accounts: record their last four, confirm the owner assignment and connect complete history for ${scope.from} through ${scope.to}.`);
-  }
+  const unknownAccounts = discovery.count;
+  for (const { reason, missing } of discovery.gaps) lower(69, reason, missing);
   score -= Math.ceil(40 * (missingAccounts + unknownAccounts) / Math.max(1, selected.length + unknownAccounts));
   if (totalDays) score -= Math.ceil(40 * missingDays / totalDays);
   const byAccount = new Map(selected.map(a => [key(a), a]));

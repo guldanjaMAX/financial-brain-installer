@@ -41,15 +41,20 @@ export function overviewFixture(t) {
       VALUES (?,?,?,?,?,'owner_stated',?,?)`, slug, status, from, to, STAMP, basis, STAMP);
   const connection = (slug, provider = 'plaid', status = 'connected', environment = 'production') => {
     const ref = (provider === 'plaid' ? 'acct_' : 'sfa_') + createHash('sha256').update(slug).digest('hex').slice(0, 32);
-    run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?', ref, slug);
+    run('UPDATE fin_accounts SET external_ref=?,source_feed=? WHERE account_slug=?',
+      provider === 'plaid' ? 'synthetic' : ref, 'bank-feed:' + slug, slug);
     // Only synthetic ciphertext-shaped storage, constructed at runtime.
     run(`INSERT INTO bank_feed_items(item_ref,access_ciphertext,access_iv,environment,status,status_detail,connected_at,removed_at)
       VALUES (?,?,?,?,?,'Synthetic status',?,?)`, slug, Buffer.from('synthetic storage bytes').toString('base64'),
       Buffer.from('synthetic iv').toString('base64'), environment, status, STAMP, status === 'removed' ? STAMP : null);
     if (provider === 'plaid') run(`INSERT INTO plaid_account_entity_assignments(item_ref,provider_account_id,account_ref,entity_slug,discovered_at,last_seen_at,assigned_at,updated_at)
       VALUES (?,'synthetic',?,'owner',?,?,?,?)`, slug, ref, STAMP, STAMP, STAMP, STAMP);
-    else run(`INSERT INTO simplefin_account_assignments(item_ref,provider_account_id,account_ref,currency,entity_slug,first_seen_at,last_seen_at,assigned_at)
-      VALUES (?,'synthetic',?,'USD','owner',?,?,?)`, slug, ref, STAMP, STAMP, STAMP);
+    else {
+      run(`INSERT INTO simplefin_connections(item_ref,backfill_start,backfill_next,backfill_end,next_pull_at,updated_at)
+        VALUES (?,'2025-12-03','2025-12-03','2025-12-03',?,?)`, slug, STAMP, STAMP);
+      run(`INSERT INTO simplefin_account_assignments(item_ref,provider_account_id,account_ref,currency,entity_slug,first_seen_at,last_seen_at,assigned_at)
+        VALUES (?,'synthetic',?,'USD','owner',?,?,?)`, slug, ref, STAMP, STAMP, STAMP);
+    }
   };
   return { db, env, calls, run, account, row, coverage, connection };
 }

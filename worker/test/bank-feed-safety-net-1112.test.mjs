@@ -10,6 +10,8 @@ import { assignPlaidAccountEntity } from '../src/lib/plaid-account-entities.js';
 import { sourceModuleHarness } from '../../test/helpers/source-module-harness.mjs';
 const localMcp = await sourceModuleHarness(new URL('../../components/brain-mcp.mjs',import.meta.url));
 import { queryMoney } from '../src/lib/money-query.js';
+import { overviewMoney } from '../src/lib/money-overview.js';
+import { handleMcp } from '../src/lib/mcp-endpoint.js';
 import { waitForQuietFile } from './quiet-file.mjs';
 
 const ambientFetch=globalThis.fetch;
@@ -33,14 +35,14 @@ async function bankOutcomeHarness() {
   return module.exports.bankRowOutcome;
 }
 
-async function connected({fixture=null,itemRef='synthetic-item',accountId='synthetic-account',mask='1234'}={}) {
-  const f = fixture || await createProductFixture({env:{ BANK_FEED_PROVIDER:'plaid', BANK_FEED_ENV:'sandbox',
+async function connected({fixture=null,itemRef='synthetic-item',accountId='synthetic-account',mask='1234',environment='sandbox'}={}) {
+  const f = fixture || await createProductFixture({env:{ BANK_FEED_PROVIDER:'plaid', BANK_FEED_ENV:environment,
     BRAIN_TIMEZONE:'Etc/UTC',
     BANK_FEED_CLIENT_ID:'fixture-client', BANK_FEED_SECRET:'fixture-secret',
     BANK_FEED_WRAPPING_KEY_V2:['v2.', 'A'.repeat(43)].join('') }});
   const encrypted = await encryptAccessReference(f.env, ['fixture','access'].join('-'));
   f.raw(`INSERT INTO bank_feed_items (tenant_id,item_ref,access_ciphertext,access_iv,key_version,environment,connected_at)
-    VALUES ('primary',?,?,?,?, 'sandbox',?)`,itemRef,encrypted.ciphertext,encrypted.iv,encrypted.keyVersion,START);
+    VALUES ('primary',?,?,?,?,?,?)`,itemRef,encrypted.ciphertext,encrypted.iv,encrypted.keyVersion,environment,START);
   if (!f.first("SELECT id FROM fin_entities WHERE entity_slug='owner-business'")) seedOwnedEntity(f,'owner-business','Owner business');
   let login = false; const calls=[];
   const fetchImpl = async (url) => {
@@ -65,6 +67,182 @@ async function connected({fixture=null,itemRef='synthetic-item',accountId='synth
   assert.equal(f.first('SELECT COUNT(*) AS n FROM fin_transactions WHERE source_feed=?',`bank-feed:${itemRef}`).n,1);
   return {f,fetchImpl,calls,setLogin:()=>{login=true;}};
 }
+
+test('promoted Plaid account has verified connection evidence in both money tools', async t => {
+  const {f} = await connected({environment:'production'});
+  t.after(() => f.close());
+  const ledger = f.first('SELECT account_slug,external_ref,source_feed FROM fin_accounts');
+  const assignment = f.first('SELECT account_ref,provider_account_id,item_ref FROM plaid_account_entity_assignments');
+  assert.equal(ledger.external_ref, assignment.provider_account_id);
+  assert.notEqual(ledger.external_ref, assignment.account_ref);
+  assert.equal(ledger.source_feed, 'bank-feed:' + assignment.item_ref);
+  assert.equal(f.first('SELECT last_synced_at FROM bank_feed_items').last_synced_at, START);
+
+  const options = {now: () => Date.parse(START)};
+  const missingConnection = /not connected|no verified successful sync time|discovered feed accounts/;
+  const readOverview = () => overviewMoney(f.env, options);
+  const query = {
+    sql: "SELECT SUM(amount_minor) AS figure FROM txn WHERE posted_on BETWEEN '2026-10-28' AND '2026-10-28'",
+    from: '2026-10-28', through: '2026-10-28',
+  };
+  const readQuery = () => queryMoney(f.env, query, options);
+  await t.test('money overview', async () => {
+    assert.equal((await readOverview()).accounts[0].last_observed_at, START);
+    const observed = '2026-10-28T11:30:00.000Z';
+    f.raw('UPDATE plaid_account_entity_assignments SET last_seen_at=?', observed);
+    const overview = await readOverview();
+    f.raw('UPDATE plaid_account_entity_assignments SET last_seen_at=?', START);
+    assert.equal(overview.accounts.length, 1);
+    assert.equal(overview.accounts[0].connected, true);
+    assert.equal(overview.accounts[0].last_observed_at, observed);
+    assert.equal(overview.accounts[0].last_sync, START);
+    assert.doesNotMatch(overview.confidence_text, missingConnection);
+  });
+  await t.test('saved sync receipt is independent of connection status', async () => {
+    try {
+      f.raw('UPDATE plaid_account_entity_assignments SET last_seen_at=?', DAY);
+      assert.equal((await readOverview()).accounts[0].last_sync, START);
+    } finally {
+      f.raw('UPDATE plaid_account_entity_assignments SET last_seen_at=?', START);
+    }
+  });
+
+  await t.test('hosted tools preserve the promoted account and its connection evidence', async () => {
+    const url = new URL('https://brain.invalid/mcp');
+    const call = async (name, args) => {
+      const response = await handleMcp(f.env, new Request(url, {
+        method: 'POST',
+        body: JSON.stringify({ id: 1, method: 'tools/call', params: { name, arguments: args } }),
+      }), url, { grant: { profile: 'librarian' } });
+      const { result } = await response.json();
+      assert.notEqual(result.isError, true);
+      return JSON.parse(result.content[0].text);
+    };
+    const overview = await call('brain_money_overview', {});
+    assert.equal(overview.accounts[0].account_slug, ledger.account_slug);
+    assert.equal(overview.accounts[0].connected, true);
+    assert.equal(overview.accounts[0].last_sync, START);
+    assert.doesNotMatch(overview.confidence_text, missingConnection);
+    assert.doesNotMatch((await call('brain_money_query', query)).confidence_text, missingConnection);
+    try {
+      f.raw("UPDATE bank_feed_items SET status='permission_revoked',status_detail='Permission revoked'");
+      assert.equal((await call('brain_money_overview', {})).accounts[0].connected, false);
+      assert.match((await call('brain_money_query', query)).confidence_text, /not connected/);
+    } finally {
+      f.raw("UPDATE bank_feed_items SET status='connected',status_detail=NULL");
+    }
+  });
+
+  await t.test('money query', async () => {
+    const result = await readQuery();
+    assert.equal(result.rows[0].figure, 1000);
+    assert.doesNotMatch(result.confidence_text, missingConnection);
+  });
+
+  await t.test('assignment observation cannot stand in for a sync receipt', async () => {
+    f.raw('UPDATE bank_feed_items SET last_synced_at=NULL');
+    try {
+      const overview = await readOverview();
+      assert.equal(overview.accounts[0].connected, true);
+      assert.equal(overview.accounts[0].last_observed_at, START);
+      assert.equal(overview.accounts[0].last_sync, null);
+      assert.match(overview.confidence_text, /no verified successful sync time/);
+      assert.match((await readQuery()).confidence_text, /no verified successful sync time/);
+    } finally {
+      f.raw('UPDATE bank_feed_items SET last_synced_at=?', START);
+    }
+  });
+
+  await t.test('public Plaid replacement reference still connects', async () => {
+    f.raw('UPDATE fin_accounts SET external_ref=?', assignment.account_ref);
+    try {
+      assert.equal((await readOverview()).accounts[0].connected, true);
+      assert.doesNotMatch((await readQuery()).confidence_text, missingConnection);
+    } finally {
+      f.raw('UPDATE fin_accounts SET external_ref=?', ledger.external_ref);
+    }
+  });
+
+  for (const [state, change, restore] of [
+    ['disconnected', "SET status='removed',removed_at=last_synced_at,status_detail='Disconnected'",
+      "SET status='connected',removed_at=NULL,status_detail=NULL"],
+    ['revoked', "SET status='permission_revoked',status_detail='Permission revoked'", "SET status='connected',status_detail=NULL"],
+    ['needs sign-in', "SET status='reauth_required',status_detail='Sign-in required'", "SET status='connected',status_detail=NULL"],
+    ['another owner', "SET tenant_id='other'", "SET tenant_id='primary'"],
+  ]) {
+    await t.test(state, async () => {
+      assert.equal((await readOverview()).accounts[0].connected, true);
+      assert.doesNotMatch((await readQuery()).confidence_text, missingConnection);
+      f.raw(`UPDATE bank_feed_items ${change}`);
+      try {
+        assert.equal((await readOverview()).accounts[0].connected, false);
+        const result = await readQuery();
+        assert.equal(result.rows[0].figure, 1000);
+        assert.match(result.confidence_text, /not connected/);
+        assert.match(result.confidence_text, /no verified successful sync time/);
+      } finally {
+        f.raw(`UPDATE bank_feed_items ${restore}`);
+      }
+    });
+  }
+
+  await t.test('provider ID from another connection cannot supply evidence', async () => {
+    assert.equal((await readOverview()).accounts[0].connected, true);
+    assert.doesNotMatch((await readQuery()).confidence_text, missingConnection);
+    f.raw("UPDATE fin_accounts SET source_feed='bank-feed:other-connection'");
+    assert.equal((await readOverview()).accounts[0].connected, false);
+    const result = await readQuery();
+    assert.match(result.confidence_text, /not connected/);
+    assert.match(result.confidence_text, /no verified successful sync time/);
+    assert.match(result.confidence_text, /1 discovered feed accounts have no current ledger account/);
+    assert.equal(result.rows[0].figure, 1000);
+  });
+});
+
+test('cross-Item Plaid reference collisions cannot lend connection or sync evidence', async t => {
+  const {f} = await connected({itemRef:'collision-b',environment:'production',mask:'5678'});
+  t.after(() => f.close());
+  const other = f.first("SELECT account_ref,provider_account_id FROM plaid_account_entity_assignments WHERE item_ref='collision-b'");
+  const seed = 297413;
+  for (const [index, reference] of ['account_ref', 'provider_account_id'].entries()) {
+    await t.test(reference, async () => {
+      const item = `collision-${seed + index}`;
+      const mask = String(4100 + index);
+      // For the raw-ID sibling, switch B's test ID after promoting A so both
+      // ledger accounts keep separate slugs and retained postings.
+      const id = index ? item : other[reference];
+      await connected({fixture:f,itemRef:item,accountId:id,mask,environment:'production'});
+      if (index) {
+        f.raw("UPDATE fin_accounts SET external_ref=? WHERE source_feed='bank-feed:collision-b'", other.account_ref);
+        f.raw("UPDATE plaid_account_entity_assignments SET provider_account_id=? WHERE item_ref='collision-b'", id);
+      }
+      const account = f.first('SELECT account_slug,external_ref,source_feed FROM fin_accounts WHERE mask=?', mask);
+      assert.equal(account.external_ref, id);
+      assert.equal(account.source_feed, 'bank-feed:' + item);
+      const options = {now: () => Date.parse(START)};
+      const read = async () => {
+        const overview = await overviewMoney(f.env, options);
+        const query = await queryMoney(f.env, {
+          sql: `SELECT SUM(amount_minor) AS figure FROM txn WHERE account_slug='${account.account_slug}' AND posted_on='2026-10-28'`,
+          from:'2026-10-28',through:'2026-10-28',
+        }, options);
+        assert.equal(query.rows[0].figure, 1000);
+        return {account:overview.accounts.find(a => a.account_slug === account.account_slug), query, overview};
+      };
+      const control = await read();
+      assert.equal(control.account.connected, true);
+      assert.equal(control.account.last_sync, START);
+      assert.doesNotMatch(control.query.confidence_text, new RegExp(`Account ending ${mask} (?:is not connected|has no verified successful sync)`));
+      f.raw("UPDATE bank_feed_items SET status='permission_revoked',status_detail='Permission revoked' WHERE item_ref=?", item);
+      const challenged = await read();
+      assert.equal(challenged.overview.accounts.find(a => a.last4 === '5678').connected, true);
+      assert.equal(challenged.account.connected, false);
+      assert.equal(challenged.account.last_sync, null);
+      assert.match(challenged.query.confidence_text, new RegExp(`Account ending ${mask} is not connected`));
+      assert.match(challenged.query.confidence_text, new RegExp(`Account ending ${mask} has no verified successful sync`));
+    });
+  }
+});
 
 test('R1B pending work over twelve hours late is visible without cron, then the laptop wakes sync',async()=>{
   const {f,fetchImpl,calls}=await connected();

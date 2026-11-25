@@ -17,6 +17,7 @@ import { classifyLedgerQuestion } from "../worker/src/lib/ledger-question.js";
 import * as workspace from "../operations/claude-workspace.mjs";
 import * as cli from "../brain.mjs";
 import { ownerSelfcheckRows, ownerUpdateRows } from "../operations/owner-checklist.mjs";
+import { updateSelfcheckMessage } from "../operations/update-selfcheck.mjs";
 import { reviewedSkillContent } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { MONEY_RULES_LINE } from "../operations/answer-setup-copy.mjs";
@@ -484,7 +485,7 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
 // Exercise the production composition boundary with controlled locator data.
 // Its dependencies are replaced, but the closing logic is read from the CLI so
 // a whole-report render cannot hide behind a separately implemented formatter.
-function updateClosingBoundary({ platform = "win32", platformName, folder = "ordinary folder", locator = "", raw = false } = {}) {
+function updateClosingBoundary({ platform = "win32", platformName, folder = "ordinary folder", locator = "", raw = false, selfcheckReport, sessionFolderLabel = "another folder" } = {}) {
   const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
   const start = source.indexOf("  const attention = [...new Set(updateAttention)];");
   const end = source.indexOf("\n  return upgradeResult;", start);
@@ -493,6 +494,7 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
   const renderOptions = { platform: platformName ?? platform ?? process.platform, env: { PATH: "" }, nodePath: "C:\\Runtime\\node.exe", scriptPath: "C:\\Runtime\\brain.mjs" };
   const target = win32.join("C:\\Owner", folder, "brain.manifest.json");
   const reports = [], renderCalls = [], restart = [];
+  const failureState = {};
   const bindings = {
     updateAttention: [guidance, guidance],
     schedulerResults: [],
@@ -500,13 +502,16 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
     acceptance: undefined,
     afterSelfcheck: undefined,
     ownerAgentRefreshResult: undefined,
+    reconcileOwnerAgents: null,
+    failureState,
     ownerUpdateRows,
     ownerSelfcheckRows,
     printOwnerChecklist: message => reports.push(message),
-    selfcheckReport: undefined,
+    selfcheckReport,
+    updateSelfcheckMessage,
     options: { platform, platformName, reportUpdateGuidance: message => restart.push(message), ...(raw ? { reportUpdateFinish: message => reports.push(message) } : {}) },
     pin: { target }, PRODUCT_VERSION: "0.4.27", mailTransition: null,
-    ownerSessionFolderLabel: () => "another folder",
+    ownerSessionFolderLabel: () => sessionFolderLabel,
     ownerBrainFolderWarning: () => locator,
     dirname: win32.dirname, quotePowerShellArgument, quotePosixArgument,
     console: { log: message => reports.push(message) },
@@ -517,9 +522,23 @@ function updateClosingBoundary({ platform = "win32", platformName, folder = "ord
     safelyReportUpdateResult: (report, message) => report(message),
   };
   cliModule(bindings, `(function(){${source.slice(start,end)}\n})()`);
-  assert.equal(reports.length, 1, "the closing reporter was reached exactly once");
-  return { closing: reports[0], restart: restart[0], renderCalls, guidance, renderOptions, target };
+  failureState.reportCompletion?.();
+  assert.equal(reports.length, 2, "the checklist and completion were each reported once");
+  return { closing: reports[0], completion: reports.slice(1), restart: restart[0], renderCalls, guidance, renderOptions, target };
 }
+
+test("update with an unchecked self-check keeps the qualified closing and restart guidance", () => {
+  const selfcheckReport = {
+    status: "not_checked",
+    checks: [{ category: "bank", status: "not_checked", code: "UPDATE_SELFCHECK_NOT_CHECKED" }],
+  };
+  const run = updateClosingBoundary({ selfcheckReport });
+  assert.match(run.closing, /Bank access needs attention/);
+  assert.deepEqual(run.completion, [
+    `Your Brain is now on version 0.4.27.\n${updateSelfcheckMessage(selfcheckReport)}`,
+  ]);
+  assert.match(run.restart, /^One last step:/u);
+});
 
 test("WIN R7 closing preserves a quoted command-shaped folder with an ordinary-folder control", () => {
   for (const folder of ["ordinary folder", "brain update archive"]) {
@@ -565,11 +584,45 @@ test("WIN R7 raw reporter and POSIX closing preserve the composed bytes and plat
   }
 });
 
+// Cover the entire rejected character class, with reproducible surrounding
+// shell metacharacters and an otherwise identical copyable control per row.
+for (const code of [...Array.from({ length: 32 }, (_, index) => index), 127]) {
+  const label = sha(`0435-closing-r1-72964:${code}`).slice(0, 8);
+  const sessionFolderLabel = code % 2 === 0 ? "your Desktop folder" : "another folder";
+  test(`update restart handles refused folder character ${code}`, () => {
+    for (const [platform, quote] of [["linux", quotePosixArgument], ["win32", quotePowerShellArgument]]) {
+      const folder = `Owner's folder $${label}`;
+      const control = updateClosingBoundary({ platform, folder, sessionFolderLabel });
+      assert.ok(control.restart.includes(quote(win32.dirname(control.target))));
+      assert.equal(control.restart.includes("Next time,"), sessionFolderLabel === "your Desktop folder");
+
+      const refused = `${folder}${String.fromCharCode(code)} archive`;
+      assert.throws(() => quote(win32.join("C:\\Owner", refused)), /not safe to display as a copyable command/u);
+      const run = updateClosingBoundary({ platform, folder: refused, sessionFolderLabel });
+      assert.deepEqual(run.completion, control.completion);
+      assert.equal(run.restart, control.restart.split("\nNext time,")[0].replace(
+        platform === "win32"
+          ? `Set-Location -LiteralPath ${quote(win32.dirname(control.target))} -ErrorAction Stop; claude`
+          : `cd ${quote(win32.dirname(control.target))} && claude`,
+        "claude",
+      ));
+    }
+  });
+}
+
 test("WIN R7 real update preserves folder commands and locator prose in the default closing report", async t => {
-  for (const folder of ["ordinary folder", "brain update archive"]) {
+  const restricted = process.platform === "win32" ? "\x7f" : "\t";
+  for (const { folder, parent, platform, manual } of [
+    { folder: "ordinary folder", platform: "win32" },
+    { folder: "brain update archive", platform: "win32" },
+    { folder: "brain", parent: "Parent Folder", platform: "linux" },
+    { folder: "brain", parent: `Parent${restricted}Folder`, platform: "linux", manual: true },
+  ]) {
     const { root } = fixture(t);
-    const target = join(root, folder);
-    mkdirSync(target);
+    const target = join(root, parent ?? "", folder);
+    const session = parent ? join(root, parent, "session") : join(root, "Desktop");
+    mkdirSync(target, { recursive: true });
+    if (parent) mkdirSync(session);
     const manifest = join(target, "brain.manifest.json");
     const keyFile = join(root, "fixture-admin-key");
     writeFileSync(keyFile, ["synthetic", "fixture", "only"].join("-"), { mode: 0o600 });
@@ -580,9 +633,11 @@ test("WIN R7 real update preserves folder commands and locator prose in the defa
     }));
     const events = [], output = [], guidance = [];
     const capture = mock.method(console, "log", message => output.push(String(message)));
+    const cwd = process.cwd();
     try {
+      if (parent) process.chdir(session);
       const result = await cli.cmdUpdate(manifest, {
-        lifecycleLockHeld: true, home: root, platform: "win32", sessionFolder: join(root, "Desktop"),
+        lifecycleLockHeld: true, home: root, platform, sessionFolder: session,
         dailyRefreshOptions: { platform: "linux", schedulerOptions: { home: root, launchctl: () => { throw new Error("unexpected scheduler"); } } },
         discoverInstalledManifest: () => ({ path: manifest, source: "remembered" }),
         adoptCloudflareAuthProfile: async () => {}, withCloudflareControl: async run => run(),
@@ -591,14 +646,32 @@ test("WIN R7 real update preserves folder commands and locator prose in the defa
         reconcileExistingOwnerAgents: null, writeClaudeWorkspaceGuideAfterUpdate: null, writeCodexWorkspaceGuideAfterUpdate: null,
         installTechnicianSkills: () => { events.push("skills"); throw new Error("fixture refresh warning"); },
         reportSkillRefreshOk: () => {}, reportSkillRefreshWarning: () => {},
-        reportUpdateGuidance: message => guidance.push(message),
+        reportUpdateGuidance: message => { guidance.push(message); console.log(message); },
       });
       assert.equal(result.status, "verified");
-    } finally { capture.mock.restore(); }
-    assert.deepEqual(events, ["verify", "upgrade", "skills"], "real update reaches the successful closing decision");
+    } finally {
+      process.chdir(cwd);
+      capture.mock.restore();
+      assert.deepEqual(events, ["verify", "upgrade", "skills"], "real update reaches the successful closing decision");
+      assert.ok(output.some(message => message.startsWith("✔ Version ")), "the closing checklist was printed");
+    }
     const closing = output.filter(line => line.startsWith("✔ Version "));
     assert.equal(closing.length, 1);
-    assert.ok(guidance[0].includes(`Set-Location -LiteralPath ${quotePowerShellArgument(target)} -ErrorAction Stop; claude`));
+    if (manual) {
+      assert.match(guidance[0], /open a terminal in your Financial Brain folder and run: claude\./u);
+      assert.ok(!guidance[0].includes(restricted), "the refused absolute path stays out of the restart block");
+    } else {
+      const command = platform === "win32"
+        ? `Set-Location -LiteralPath ${quotePowerShellArgument(target)} -ErrorAction Stop; claude`
+        : `cd ${quotePosixArgument(target)} && claude`;
+      assert.ok(guidance[0].includes(command));
+    }
+    assert.equal(guidance.length, 1);
+    const lines = output.flatMap(message => message.split("\n"));
+    const done = lines.findIndex(line => /^Done\. Your Brain is now on version /u.test(line));
+    const restarts = lines.filter(line => line.startsWith("One last step:"));
+    assert.equal(restarts.length, 1);
+    assert.ok(done >= 0 && lines.indexOf(restarts[0]) > done);
     assert.ok(closing[0].includes("The technician guide could not be refreshed. Ask your installer to use https://financialbrain.ai/update/agent.md."));
   }
 });

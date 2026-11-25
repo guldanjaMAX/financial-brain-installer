@@ -12,7 +12,8 @@ import { MONEY_TABLES, MONEY_TABLE_COLUMNS, unavailableMoneyQuery, localDateFor 
 import { cleanMoneyCtes, CLEAN_MONEY_VIEWS, CLEAN_MONEY_SNAPSHOT_SQL, classifiedMoneyCtes, moneyMembershipDecisions, MoneySnapshotLimitError } from './clean-money.js';
 export { CLEAN_MONEY_CTES, CLEAN_MONEY_VIEWS } from './clean-money.js';
 import { moneyConfidenceSnapshotSql, moneyConfidenceScope, confidenceAmountsSql,
-  scoreMoneyConfidence, unknownMoneyConfidence, confidenceText, paymentEvidenceConfidence, limitMoneyConfidence } from './money-confidence.js';
+  scoreMoneyConfidence, unknownMoneyConfidence, confidenceText, paymentEvidenceConfidence, limitMoneyConfidence,
+  verifiedMoneySyncInstant, moneyDiscoveryGaps } from './money-confidence.js';
 import { SIMPLEFIN_MINOR_UNIT_SNAPSHOT_SQL, SIMPLEFIN_MINOR_UNIT_UNAVAILABLE, describeSimpleFinMinorUnitGaps, simpleFinMinorUnitEvidenceSql } from './simplefin-minor-unit-evidence.js';
 import { moneySqlConfidence, moneySqlUsesClock } from './money-confidence.js';
 import { moneyQueryConfidence, moneyQueryEvidence, readsRepaymentMeasure, repaymentUncertainty } from './money-query-confidence.js';
@@ -683,8 +684,12 @@ SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -
         else {
           // Match inventory filters to the very same frozen public identities.
           // Private connection facts keep their fixed, credential-free shape.
-          qualityAccounts = evidence.confidence_accounts.map(a=>({...a,...Object.fromEntries(
-            ['account','account_identity','entity','side'].map(k=>[k,evidence.coverage.find(c=>c.tenant_id===a.tenant_id && c.account_slug===a.account_slug)?.[k]]))}));
+          qualityAccounts = evidence.confidence_accounts.map(a=>({
+            ...a,
+            last_sync: verifiedMoneySyncInstant(a.last_sync, started) === null ? null : a.last_sync,
+            ...Object.fromEntries(['account','account_identity','entity','side'].map(k=>
+              [k,evidence.coverage.find(c=>c.tenant_id===a.tenant_id && c.account_slug===a.account_slug)?.[k]])),
+          }));
           const evidenceBinds = [...binds];
           const amountSql=confidenceAmountsSql(ctes, scope, evidenceBinds);
           if(evidenceBinds.length>maxBinds)throw new Error('confidence parameter budget');
@@ -704,11 +709,8 @@ SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -
               `Account ending ${account?.last4 || '(unknown)'}: ${amount.currency} ${moneyMinorText(amount.amount_minor, amount.currency, { grouped: false })} ${amount.direction} from ${amount.from_date} through ${amount.to_date} names the requested processor but has unproved processor attribution and may be omitted by that filter.`,
               'Reconcile the named processor payout report, bank description and refund/transfer membership before certifying this processor total.',89);
           }
-          if (staticEvidence && !scope.filters?.account_slug) for (const a of evidence.confidence_unassigned) {
-            if (scope.filters?.tenant_id && scope.filters.tenant_id!==a.tenant_id) continue;
-            confidence=limitMoneyConfidence(confidence,
-              `${a.account_count} discovered feed accounts have no current ledger account; their coverage and dollar impact are unknown.`,
-              'Record the discovered accounts and connect complete history for the requested dates.',69);
+          if (staticEvidence) for (const { reason, missing } of moneyDiscoveryGaps(evidence.confidence_unassigned, scope).gaps) {
+            confidence=limitMoneyConfidence(confidence, reason, missing);
           }
           confidence = paymentEvidenceConfidence(confidence, body.payment_evidence, evidence.confidence_accounts, snapshot.rows);
           paymentsChecked = true;
@@ -795,11 +797,18 @@ SELECT mq_result.* FROM mq_budget CROSS JOIN (SELECT * FROM (\n${sql}\n) LIMIT -
       Date.parse(asOf.date)-Date.parse(assessmentPeriod.to)>=0 && Date.parse(asOf.date)-Date.parse(assessmentPeriod.to)<=86400000)
       confidence=limitMoneyConfidence(confidence,'The owner time zone is unconfigured at this recent period boundary; the UTC calendar may select a different relative period or hide the remaining part of the owner day.',
         'The owner IANA time zone and confirmation of the asked dates and completed observation through the end of that owner day.',89);
-    const freshnessScope = confidenceScope || (period && usesClean ? {from:period.from,to:period.to,filters:accountSlugs?.length===1?{account_slug:accountSlugs[0]}:{}} : moneyConfidenceScope(checked));
+    // A literal raw selection can scope freshness without certifying its amounts.
+    const freshnessScope = confidenceScope || (period && usesClean ? {...period,filters:sqlScope?.filters} :
+      sqlScope || (checked.references.has('fin_transactions') ? moneyConfidenceScope(checked, 'fin_transactions') : null));
+    // Resolve account aliases without applying the posting evidence filters.
+    const freshnessAccountSlugs = snapshot && (freshnessScope?.filters?.account_identity || freshnessScope?.filters?.account)
+      ? snapshot.coverage.filter(c=>(!accountSlugs || accountSlugs.includes(c.account_slug)) &&
+        ['account_identity','account'].every(k=>!freshnessScope.filters[k] || c[k]===freshnessScope.filters[k])).map(c=>c.account_slug)
+      : accountSlugs;
     const periodEnd = [period?.to,window?.through,freshnessScope?.to,selection?.rewrites ? sqlPeriod?.to : null].filter(isoDay).sort().at(-1) ||
       (isoDay(body?.period_end)?body.period_end:null) || ownerLedgerDay(started,env.BRAIN_TIMEZONE)?.day || null;
     let freshnessGaps, freshnessFailed = false;
-    try { freshnessGaps = await moneyBankFreshness(env, { read, periodEnd, now:started, scope:{...freshnessScope,accountSlugs:evidenceSlugs}, ownerDay:value=>ownerLedgerDay(value,env.BRAIN_TIMEZONE)?.day }); }
+    try { freshnessGaps = await moneyBankFreshness(env, { read, periodEnd, now:started, scope:{...freshnessScope,accountSlugs:freshnessAccountSlugs}, ownerDay:value=>ownerLedgerDay(value,env.BRAIN_TIMEZONE)?.day }); }
     catch {
       freshnessFailed = true;
       freshnessGaps = [{reason:'Bank connection freshness could not be verified.',missing:'A successful connection health read and bank activity through the asked period.'}];

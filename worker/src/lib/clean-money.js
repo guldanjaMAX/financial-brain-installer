@@ -9,6 +9,7 @@ import { cleanMoneyContributions, CONTRIBUTION_FIELDS } from './clean-money-cont
 import { matchPlatformReserves } from './money-platform.js';
 import { refineTransferPairs, processorSweepEstimates } from './clean-money-transfers.js';
 import { refineLoanDrawPairs, loanDrawReading } from './clean-money-loan-proceeds.js';
+import { PLAID_LEDGER_REFERENCE_SQL, SIMPLEFIN_LEDGER_REFERENCE_SQL } from './money-feed-assignment.js';
 
 // Request-local definitions shared by the money route and available to other
 // SQL readers. Nothing creates a stored view or changes owner truth.
@@ -266,8 +267,8 @@ mq_in AS MATERIALIZED (SELECT * FROM mq_rows WHERE direction='inflow'), mq_candi
     CASE WHEN a.feed_mode<>'live' THEN 'import'
       -- Pending capability belongs to the current assigned feed. An old Plaid
       -- posting must not certify pending collection after a SimpleFIN switch.
-      WHEN EXISTS(SELECT 1 FROM simplefin_account_assignments s WHERE s.tenant_id=a.tenant_id AND s.account_ref=a.external_ref) THEN 'simplefin'
-      WHEN EXISTS(SELECT 1 FROM plaid_account_entity_assignments p WHERE p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref) THEN 'plaid'
+      WHEN EXISTS(SELECT 1 FROM simplefin_account_assignments s WHERE s.tenant_id=a.tenant_id AND ${SIMPLEFIN_LEDGER_REFERENCE_SQL}) THEN 'simplefin'
+      WHEN EXISTS(SELECT 1 FROM plaid_account_entity_assignments p WHERE p.tenant_id=a.tenant_id AND ${PLAID_LEDGER_REFERENCE_SQL}) THEN 'plaid'
       ELSE COALESCE((SELECT t.source_provider FROM mq_posted t WHERE t.tenant_id=a.tenant_id
         AND t.account_slug=a.account_slug AND t.source_provider IS NOT NULL LIMIT 1),'live') END AS feed_kind,
     r.first_row,r.last_row,COALESCE(r.row_count,0) AS row_count,
@@ -281,8 +282,8 @@ mq_in AS MATERIALIZED (SELECT * FROM mq_rows WHERE direction='inflow'), mq_candi
     COALESCE(pending.pending_out_minor,0) AS pending_out_minor,pending.pending_oldest_on,
     NULL AS last_sync,'unavailable_private_connection_state' AS sync_basis,
     (SELECT MAX(observed_at) FROM (
-      SELECT p.last_seen_at AS observed_at FROM plaid_account_entity_assignments p WHERE p.tenant_id=a.tenant_id AND p.account_ref=a.external_ref
-      UNION ALL SELECT s.last_seen_at FROM simplefin_account_assignments s WHERE s.tenant_id=a.tenant_id AND s.account_ref=a.external_ref)) AS last_observed_at,
+      SELECT p.last_seen_at AS observed_at FROM plaid_account_entity_assignments p WHERE p.tenant_id=a.tenant_id AND ${PLAID_LEDGER_REFERENCE_SQL}
+      UNION ALL SELECT s.last_seen_at FROM simplefin_account_assignments s WHERE s.tenant_id=a.tenant_id AND ${SIMPLEFIN_LEDGER_REFERENCE_SQL})) AS last_observed_at,
     COALESCE((${validCoverage}),0) AS coverage_verified,
     COALESCE(x.excluded_rows,0) AS excluded_rows,COALESCE(x.excluded_inflow_minor,0) AS excluded_inflow_minor,
     COALESCE(x.excluded_outflow_minor,0) AS excluded_outflow_minor,

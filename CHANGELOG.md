@@ -4,6 +4,23 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.35 (2026-11-24)
+
+- **Synced bank accounts show as connected in money answers.** Your Brain uses the last verified sync time.
+- **Update shows the closing message and restart instructions once.** They appear after checks pass.
+
+### This release does NOT cover
+
+- Replacing a bank connection does not revoke the old connection's permission
+  at your bank, and it does not prove complete history for the missing-access
+  period until you compare that period with your statement.
+- Some answers say Medium or Low more often than ideal. Read the stated gaps
+  and check the cited records before relying on a figure.
+- QuickBooks direct connection is pending Intuit approval.
+- Windows x64 is the only supported Windows runtime in this release. Windows
+  ARM64 ships unproven.
+- Bank breadth ships unproven. Bank invitations stay closed.
+
 ## 0.4.34 (2026-11-22)
 
 - **Bank balances need a fresh check.** Your Brain shows a balance as current

@@ -21,7 +21,7 @@ function book(t,id='') {
   f.coverage('operating',december?'2025-01-01':'2026-01-01',december?'2025-12-31':'2026-11-12');
   if(live) {
     const ref='acct_'+createHash('sha256').update('operating').digest('hex').slice(0,32);
-    f.run('UPDATE fin_accounts SET external_ref=? WHERE account_slug=?',ref,'operating');
+    f.run('UPDATE fin_accounts SET external_ref=?,source_feed=? WHERE account_slug=?',ref,'bank-feed:operating','operating');
     f.run(`INSERT INTO bank_feed_items(item_ref,access_ciphertext,access_iv,environment,status,status_detail,connected_at,last_synced_at)
       VALUES (?,?,?,'production','connected','Synthetic status',?,?)`,'operating',Buffer.from('synthetic bytes').toString('base64'),Buffer.from('synthetic iv').toString('base64'),f.clock,f.clock);
     f.run(`INSERT INTO plaid_account_entity_assignments(item_ref,provider_account_id,account_ref,entity_slug,discovered_at,last_seen_at,assigned_at,updated_at)
