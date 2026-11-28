@@ -130,6 +130,16 @@ Invoke-SmokeStage 'fresh-tools' @('signed-exe') {
         Assert-Smoke ($process.ExitCode -eq 0) 'SMOKE_NODE_UNINSTALL'
     }
     Assert-Smoke (-not (Test-Path -LiteralPath $SmokeNode)) 'SMOKE_NODE_BINARY_REMAINS'
+    # A client PC has no Git yet. The hosted runner ships machine Git, and the pinned
+    # installer upgrades that copy in place instead of installing per-user, so remove
+    # the runner's machine Git (disposable VM) to test the real fresh-install path.
+    $machineGitUninstaller = Join-Path $env:ProgramFiles 'Git\unins000.exe'
+    if (Test-Path -LiteralPath $machineGitUninstaller) {
+        $process = Start-Process -FilePath $machineGitUninstaller -ArgumentList '/VERYSILENT /NORESTART /SUPPRESSMSGBOXES' -Wait -PassThru
+        $script:SmokeNativeExit = $process.ExitCode
+        Assert-Smoke ($process.ExitCode -eq 0) 'SMOKE_MACHINE_GIT_UNINSTALL'
+        Write-SmokeLog 'EVIDENCE removed the runner machine Git before the fresh install'
+    }
     Assert-Smoke (-not (Test-Path -LiteralPath $SmokeGit)) 'SMOKE_USER_GIT_PREEXISTS'
     Assert-Smoke (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'FinancialBrainSetup\0.4.36\kit'))) 'SMOKE_KIT_PREEXISTS'
     Write-SmokeLog ('EVIDENCE hidden Node/Git; absent native Claude/user Git/kit; removed Node MSI registrations=' + $registrations.Count)
@@ -156,6 +166,8 @@ Invoke-SmokeStage 'git' @('node') {
     Assert-Smoke (-not (Test-Git)) 'SMOKE_GIT_DECISION'
     Install-Git
     Assert-Smoke ((Get-Item -LiteralPath (Join-Path $script:Work 'git.exe')).Length -gt 0) 'SMOKE_GIT_INSTALL_NOT_REACHED'
+    $found = @((Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd\git.exe'), (Join-Path $env:ProgramFiles 'Git\cmd\git.exe') | Where-Object { Test-Path -LiteralPath $_ })
+    Write-SmokeLog ('EVIDENCE git.exe after install: ' + (($found | ForEach-Object { $_.Replace($env:LOCALAPPDATA,'LOCALAPPDATA').Replace($env:ProgramFiles,'ProgramFiles') }) -join ', '))
     Set-SmokePath -Node -Git
     $command = Get-Command git.exe -CommandType Application
     Assert-Smoke ($command.Source -ieq $SmokeGit -and (Test-Git)) 'SMOKE_GIT_LOCATION'
