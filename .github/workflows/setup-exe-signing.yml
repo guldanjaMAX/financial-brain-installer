@@ -1,0 +1,105 @@
+name: setup-exe-signing
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: setup-exe-signing
+  cancel-in-progress: false
+
+jobs:
+  windows-sign:
+    name: build and sign the Windows setup launcher
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.SIGNING_REPOSITORY != '' &&
+      github.repository == vars.SIGNING_REPOSITORY
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: artifact-signing
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: powershell
+    env:
+      SETUP_SOURCE: machine-prep/setup-exe
+      BRAIN_NO_WRANGLER_LOGIN: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: parse, test, verify pins and compile the embedded script
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:HOME = Join-Path $env:RUNNER_TEMP 'setup-test-home'
+          New-Item -ItemType Directory -Path $env:HOME -Force | Out-Null
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Windows PowerShell 5.1 is required' }
+          & "$env:SETUP_SOURCE/self-test.ps1"
+          . "$env:SETUP_SOURCE/setup.ps1" -FunctionsOnly
+          Assert-SetupPins
+          & "$env:SETUP_SOURCE/build.ps1" -Destination "$env:GITHUB_WORKSPACE/dist"
+      - name: sign in to Azure with GitHub OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: sign with Artifact Signing
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\FinancialBrainSetup-0.4.36.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: verify the signed EXE and record its exact identity
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Resolve-Path dist/FinancialBrainSetup-0.4.36.exe
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe
+          if ($signature.Status -ne 'Valid') { throw "the EXE signature is $($signature.Status), not Valid" }
+          if (-not $signature.TimeStamperCertificate) { throw 'the EXE signature carries no RFC 3161 timestamp' }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe was not found' }
+          & $signtool.FullName verify /pa /v $exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed with exit code $LASTEXITCODE" }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          "$hash  FinancialBrainSetup-0.4.36.exe" | Set-Content -Encoding ascii dist/FinancialBrainSetup-0.4.36.exe.sha256
+          [ordered]@{
+            version = '0.4.36'
+            filename = 'FinancialBrainSetup-0.4.36.exe'
+            bytes = (Get-Item -LiteralPath $exe).Length
+            sha256 = $hash
+            signature = [string]$signature.Status
+            publisher = $signature.SignerCertificate.Subject
+            timestamp_present = [bool]$signature.TimeStamperCertificate
+            source_sha = $env:GITHUB_SHA
+          } | ConvertTo-Json | Set-Content -Encoding utf8 dist/setup-artifact.json
+      - name: upload the signed EXE
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: FinancialBrainSetup-Windows-signed
+          path: |
+            dist/FinancialBrainSetup-0.4.36.exe
+            dist/FinancialBrainSetup-0.4.36.exe.sha256
+            dist/setup-artifact.json
+          if-no-files-found: error
+          retention-days: 14
