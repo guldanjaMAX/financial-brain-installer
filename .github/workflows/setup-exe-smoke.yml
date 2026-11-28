@@ -1,0 +1,48 @@
+name: setup-exe-smoke
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-exe-smoke
+  cancel-in-progress: false
+
+jobs:
+  fresh-windows:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: powershell
+    env:
+      BRAIN_NO_WRANGLER_LOGIN: '1'
+    steps:
+      - name: Check out the dispatched source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check syntax and run the real preparation stages
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:HOME = Join-Path $env:RUNNER_TEMP 'setup-smoke-home'
+          New-Item -ItemType Directory -Path $env:HOME -Force | Out-Null
+          $script = Join-Path $env:GITHUB_WORKSPACE 'machine-prep/setup-exe/setup-exe-smoke.ps1'
+          $tokens = $null; $errors = $null
+          $null = [Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw 'SMOKE_PARSER' }
+          & $script
+          if (-not $?) { throw 'SMOKE_SCRIPT_FAILED' }
+      - name: Upload only the short smoke log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: setup-exe-smoke-log
+          path: ${{ runner.temp }}/setup-exe-smoke/smoke.log
+          if-no-files-found: error
+          retention-days: 7
